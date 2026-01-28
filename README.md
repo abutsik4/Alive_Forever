@@ -55,6 +55,12 @@ pip install -r requirements.txt
 python keep_alive.py
 ```
 
+### Option 3: Run Without Console Window (Silent Mode)
+
+Double-click **`run_silent.bat`** to launch completely hidden - no console window, just the tray icon!
+
+> **How it works:** Uses `pythonw.exe` instead of `python.exe` to run without a console.
+
 ---
 
 ## 📖 How to Use
