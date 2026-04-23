@@ -1,7 +1,17 @@
-# ⚡ Alive Forever
+# Alive Forever
+
+```text
++--------------------------------------------------------------+
+| Alive Forever                                                |
++--------------------------------------------------------------+
+| File  Edit  View  Help                                       |
++--------------------------------------------------------------+
+| A Windows 95-inspired tray utility that keeps Teams active.  |
++--------------------------------------------------------------+
+```
 
 <p align="center">
-  <img src="icon.png" alt="Alive Forever Icon" width="128" height="128">
+  <img src="icon.png" alt="Alive Forever Icon" width="96" height="96">
 </p>
 
 <p align="center">
@@ -9,37 +19,44 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-Windows-blue?style=flat-square" alt="Platform">
-  <img src="https://img.shields.io/badge/Python-3.8+-green?style=flat-square" alt="Python">
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-000080?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Python-3.8%2B-c0c0c0?style=flat-square" alt="Python">
+  <img src="https://img.shields.io/badge/Theme-Windows%2095-808080?style=flat-square" alt="Theme">
+  <img src="https://img.shields.io/badge/License-MIT-ffff00?style=flat-square" alt="License">
 </p>
 
----
-
-## 🎯 What It Does
+## Program Overview
 
 **Alive Forever** is a lightweight Windows application that prevents Microsoft Teams from automatically setting your status to "Away" due to inactivity. It runs quietly in your system tray and simulates subtle keyboard activity to keep you appearing "Active".
 
-### ✨ Features
+```text
++---------------------------+
+| Installed Components      |
++---------------------------+
+```
 
-- 🟢 **Always Active** - Keeps Teams showing green "Available" status
-- 🖥️ **System Tray App** - Runs silently in the background
-- ⚙️ **Retro Control Panel UI** - Windows 95-inspired configuration panel
-- 🎯 **Multiple Activity Types** - F15 key (invisible) or mouse jiggle
-- ⏱️ **Configurable Interval** - Set activity frequency (10-300 seconds)
-- 🗓️ **Time-Based Schedule** - Choose exactly when the app should stay active
-- 🧩 **Built-In Presets** - Start from Always On, Workday, Evening, or Stealth
-- 🚀 **Windows Startup** - Optional auto-start with Windows
-- 🔔 **Tray Notifications** - See schedule and state changes without opening settings
-- 📊 **Live Stats** - Track session and lifetime activity counts
-- 📝 **Persistent Logs** - Troubleshoot silent mode from a rotating log file
-- 💾 **Persistent Settings** - Your preferences are saved automatically
+- Always Active: Keeps Teams showing green "Available" status.
+- System Tray App: Runs silently in the background.
+- Retro Control Panel UI: Windows 95-inspired configuration panel.
+- Multiple Activity Types: F15 key (invisible) or mouse jiggle.
+- Configurable Interval: Set activity frequency from 10 to 300 seconds.
+- Time-Based Schedule: Choose exactly when the app should stay active.
+- Built-In Presets: Start from Always On, Workday, Evening, or Stealth.
+- Windows Startup: Optional auto-start with Windows.
+- Tray Notifications: See schedule and state changes without opening settings.
+- Live Stats: Track session and lifetime activity counts.
+- Persistent Logs: Troubleshoot silent mode from a rotating log file.
+- Persistent Settings: Your preferences are saved automatically.
 
----
+## Setup Wizard
 
-## 🚀 Quick Start
+```text
++---------------------------+
+| Quick Start               |
++---------------------------+
+```
 
-### Option 1: Double-Click Launch (Easiest)
+### Option 1: Double-Click Launch
 
 1. **Download** or clone this repository
 2. **Double-click** `run.bat`
@@ -65,9 +82,13 @@ Double-click **`run_silent.bat`** to launch completely hidden - no console windo
 
 > **How it works:** Uses `pythonw.exe` instead of `python.exe` to run without a console.
 
----
+## User Guide
 
-## 📖 How to Use
+```text
++---------------------------+
+| Notification Area         |
++---------------------------+
+```
 
 ### System Tray Icon
 
@@ -77,14 +98,15 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 |:----:|---------|
 | Desktop icon + green light | **Active** - Keeping you online |
 | Desktop icon + gray pause state | **Paused** - Normal Teams behavior |
+| Desktop icon + dark red light | **Scheduled Off** - Outside active schedule |
 
 ### Tray Menu Options
 
 **Right-click** the tray icon to access:
 
-- **⏸ Pause / ▶ Resume** - Toggle the keep-alive function
-- **⚙ Settings** - Open the configuration panel
-- **✕ Quit** - Exit the application
+- **Pause / Resume** - Toggle the keep-alive function.
+- **Settings** - Open the configuration panel.
+- **Quit** - Exit the application.
 
 ### Settings Panel
 
@@ -102,27 +124,23 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 | **Start Minimized** | Go straight to tray on launch | On |
 | **Notifications** | Show tray notifications for state changes | On |
 
----
-
-## ⚙️ How It Works
+## System Behavior
 
 The app uses one of two methods to simulate user activity:
 
-### 🔑 F15 Key Press (Recommended)
+### F15 Key Press (Recommended)
 Simulates pressing the F15 key, which:
-- ✅ Registers as keyboard activity to Windows
-- ✅ Is completely invisible (no on-screen effect)
-- ✅ Won't interfere with your work
-- ✅ Works even with Teams minimized
+- Registers as keyboard activity to Windows.
+- Is completely invisible with no on-screen effect.
+- Won't interfere with your work.
+- Works even with Teams minimized.
 
-### 🖱️ Mouse Jiggle
+### Mouse Jiggle
 Moves the mouse cursor 1 pixel and back:
-- ✅ Registers as mouse activity
-- ⚠️ May be slightly noticeable if you're doing precise work
+- Registers as mouse activity.
+- May be slightly noticeable if you're doing precise work.
 
----
-
-## 📁 Project Structure
+## Program Manager View
 
 ```
 Alive_Forever/
@@ -149,9 +167,7 @@ When the app runs, it now stores live settings and logs in:
 %APPDATA%\AliveForever\logs\alive_forever.log
 ```
 
----
-
-## 🔧 Requirements
+## System Requirements
 
 - **Windows 10/11**
 - **Python 3.8+** ([Download](https://www.python.org/downloads/))
@@ -165,7 +181,7 @@ When the app runs, it now stores live settings and logs in:
 
 Dependencies are automatically installed on first run.
 
-## 📦 Packaging
+## Packaging
 
 To build a standalone Windows package that does not require Python for end users:
 
@@ -182,9 +198,7 @@ This does the following:
 
 If NSIS is not installed, the installer script is still available at `installer/AliveForever.nsi`.
 
----
-
-## 🏃 Run at Windows Startup
+## Startup Options
 
 **Option A: Via Settings Panel**
 1. Right-click tray icon → ⚙ Settings
@@ -196,9 +210,7 @@ If NSIS is not installed, the installer script is still available at `installer/
 2. Type `shell:startup` and press Enter
 3. Create a shortcut to `run.bat` in this folder
 
----
-
-## ❓ FAQ
+## Help Topics
 
 **Q: Will this get me in trouble at work?**
 > This is a personal productivity tool. Use responsibly and in accordance with your organization's policies.
@@ -215,9 +227,7 @@ If NSIS is not installed, the installer script is still available at `installer/
 **Q: Can I change the activity interval?**
 > Yes! Open Settings and adjust the "Activity Interval" slider (10-300 seconds).
 
----
-
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
@@ -227,23 +237,21 @@ If NSIS is not installed, the installer script is still available at `installer/
 | **Teams still shows Away** | Try "Both" activity type in settings |
 | **Need to debug silent mode** | Check `%APPDATA%\AliveForever\logs\alive_forever.log` |
 
----
-
-## 📜 License
+## License
 
 MIT License - feel free to use, modify, and distribute.
 
----
-
-## 🙏 Contributing
+## Contributing
 
 Contributions welcome! Feel free to:
-- 🐛 Report bugs
-- 💡 Suggest features
-- 🔧 Submit pull requests
+- Report bugs.
+- Suggest features.
+- Submit pull requests.
 
----
-
-<p align="center">
-  Made with ⚡ to keep you <strong>Alive Forever</strong>
-</p>
+```text
++--------------------------------------------------------------+
+| Status: Ready                                                |
++--------------------------------------------------------------+
+| Made with care to keep you Alive Forever.                    |
++--------------------------------------------------------------+
+```
