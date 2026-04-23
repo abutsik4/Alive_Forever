@@ -24,11 +24,15 @@
 
 - 🟢 **Always Active** - Keeps Teams showing green "Available" status
 - 🖥️ **System Tray App** - Runs silently in the background
-- ⚙️ **Modern Settings UI** - Beautiful dark-themed configuration panel
+- ⚙️ **Retro Control Panel UI** - Windows 95-inspired configuration panel
 - 🎯 **Multiple Activity Types** - F15 key (invisible) or mouse jiggle
 - ⏱️ **Configurable Interval** - Set activity frequency (10-300 seconds)
+- 🗓️ **Time-Based Schedule** - Choose exactly when the app should stay active
+- 🧩 **Built-In Presets** - Start from Always On, Workday, Evening, or Stealth
 - 🚀 **Windows Startup** - Optional auto-start with Windows
-- 📊 **Live Stats** - Track uptime and activity count
+- 🔔 **Tray Notifications** - See schedule and state changes without opening settings
+- 📊 **Live Stats** - Track session and lifetime activity counts
+- 📝 **Persistent Logs** - Troubleshoot silent mode from a rotating log file
 - 💾 **Persistent Settings** - Your preferences are saved automatically
 
 ---
@@ -39,7 +43,7 @@
 
 1. **Download** or clone this repository
 2. **Double-click** `run.bat`
-3. Done! Look for the **cyan circle icon** in your system tray
+3. Done! Look for the **retro desktop-style icon** in your system tray
 
 ### Option 2: Manual Python Launch
 
@@ -71,8 +75,8 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 
 | Icon | Meaning |
 |:----:|---------|
-| 🔵 ✓ | **Active** - Keeping you online |
-| ⚫ ⏸ | **Paused** - Normal Teams behavior |
+| Desktop icon + green light | **Active** - Keeping you online |
+| Desktop icon + gray pause state | **Paused** - Normal Teams behavior |
 
 ### Tray Menu Options
 
@@ -85,15 +89,18 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 ### Settings Panel
 
 <p align="center">
-  <em>Access via tray icon → ⚙ Settings</em>
+  <em>Access via tray icon → Settings for a classic control-panel style window</em>
 </p>
 
 | Setting | Description | Default |
 |---------|-------------|---------|
+| **Preset** | Quick starting point for schedule and activity settings | Custom |
 | **Activity Interval** | Seconds between activity simulations | 60 |
 | **Activity Type** | F15 Key (recommended), Mouse Jiggle, or Both | F15 Key |
+| **Schedule** | One or more time windows with per-window active days | Disabled |
 | **Start with Windows** | Auto-launch when you log in | Off |
 | **Start Minimized** | Go straight to tray on launch | On |
+| **Notifications** | Show tray notifications for state changes | On |
 
 ---
 
@@ -119,12 +126,27 @@ Moves the mouse cursor 1 pixel and back:
 
 ```
 Alive_Forever/
-├── keep_alive.py      # Main application code
+├── alive_forever/     # Extracted package modules (core, ui, system)
+├── installer/         # NSIS installer script
+├── tests/             # Schedule logic tests
+├── keep_alive.py      # Thin entrypoint wrapper
+├── build.ps1          # Build helper for exe + installer
+├── AliveForever.spec  # PyInstaller spec
 ├── run.bat            # Windows launcher script
 ├── requirements.txt   # Python dependencies
-├── config.json        # Settings (auto-generated)
+├── requirements-build.txt  # Build-only dependency list
+├── config.json        # Legacy/sample settings for first-run migration
 ├── icon.png           # Application icon
 └── README.md          # This file
+```
+
+### Runtime Data Location
+
+When the app runs, it now stores live settings and logs in:
+
+```text
+%APPDATA%\AliveForever\config.json
+%APPDATA%\AliveForever\logs\alive_forever.log
 ```
 
 ---
@@ -142,6 +164,23 @@ Alive_Forever/
 | `pillow` | Icon image generation |
 
 Dependencies are automatically installed on first run.
+
+## 📦 Packaging
+
+To build a standalone Windows package that does not require Python for end users:
+
+```powershell
+./build.ps1
+```
+
+This does the following:
+
+- Regenerates `icon.png` and `icon.ico`
+- Installs PyInstaller if needed
+- Builds a packaged app into `dist/AliveForever/`
+- Builds `dist/AliveForever-Setup.exe` if `makensis` is installed
+
+If NSIS is not installed, the installer script is still available at `installer/AliveForever.nsi`.
 
 ---
 
@@ -186,6 +225,7 @@ Dependencies are automatically installed on first run.
 | **No tray icon visible** | Check the hidden icons area (^ arrow in taskbar) |
 | **Settings won't open** | Try restarting the app |
 | **Teams still shows Away** | Try "Both" activity type in settings |
+| **Need to debug silent mode** | Check `%APPDATA%\AliveForever\logs\alive_forever.log` |
 
 ---
 

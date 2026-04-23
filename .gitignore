@@ -24,3 +24,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Packaging outputs
+build/
+dist/
+icon.ico
