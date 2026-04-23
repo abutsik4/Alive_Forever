@@ -1,4 +1,4 @@
-# Alive Forever
+# <p align="center"> Alive Forever </p>
 
 ```text
 +--------------------------------------------------------------+
