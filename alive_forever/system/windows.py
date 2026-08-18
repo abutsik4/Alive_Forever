@@ -1,4 +1,4 @@
-"""Windows-specific paths, startup registration, logging, and singleton helpers."""
+"""Windows-specific paths, DPI, logging, and singleton helpers."""
 
 import ctypes
 import json
@@ -6,7 +6,6 @@ import logging
 import os
 import sys
 import tempfile
-import winreg
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -32,6 +31,57 @@ ERROR_ALREADY_EXISTS = 183
 def ensure_app_directories():
     APP_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+DEFAULT_DPI = 96.0
+
+
+def enable_dpi_awareness():
+    """Opt into real DPI scaling before Tk starts.
+
+    Without this Windows bitmap-stretches the whole window on a scaled display,
+    which is what made the control panel look soft on most laptops. Must be
+    called before the first Tk window exists.
+    """
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, Windows 10 1703+
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "per-monitor-v2"
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        # PROCESS_PER_MONITOR_DPI_AWARE, Windows 8.1+
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return "per-monitor"
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+        return "system"
+    except (AttributeError, OSError):
+        return None
+
+
+def get_display_scaling():
+    """Current UI scale as a multiplier, e.g. 1.5 at 150%."""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except (AttributeError, OSError):
+        dpi = 0
+
+    if not dpi:
+        try:
+            device_context = ctypes.windll.user32.GetDC(None)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(device_context, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(None, device_context)
+        except (AttributeError, OSError):
+            dpi = 0
+
+    if not dpi:
+        return 1.0
+    return max(1.0, min(3.0, dpi / DEFAULT_DPI))
 
 
 def has_console_streams():
@@ -102,43 +152,12 @@ class SingleInstance:
             self.handle = None
 
 
-def build_startup_command(script_path):
-    if getattr(sys, "frozen", False):
-        return '"{0}"'.format(sys.executable)
-
-    python_path = Path(sys.executable)
-    pythonw_path = python_path.with_name("pythonw.exe")
-    executable = pythonw_path if pythonw_path.exists() else python_path
-    return '"{0}" "{1}"'.format(executable, script_path)
+def show_message_box(message, title=APP_NAME, flags=0):
+    return ctypes.windll.user32.MessageBoxW(None, message, title, flags)
 
 
-def is_startup_enabled():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
-        return True
-    except OSError:
-        return False
-
-
-def set_startup_enabled(enabled, startup_command, logger):
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_SET_VALUE)
-        if enabled:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, startup_command)
-            logger.info("Enabled startup registration")
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-            except FileNotFoundError:
-                pass
-            logger.info("Disabled startup registration")
-        winreg.CloseKey(key)
-    except Exception as error:
-        logger.exception("Could not update startup registration")
-        raise RuntimeError("Could not modify startup settings: {0}".format(error))
-
-
-def show_message_box(message, title=APP_NAME):
-    ctypes.windll.user32.MessageBoxW(None, message, title, 0)
+def ask_yes_no(message, title=APP_NAME):
+    MB_YESNO = 0x04
+    MB_ICONQUESTION = 0x20
+    IDYES = 6
+    return show_message_box(message, title, MB_YESNO | MB_ICONQUESTION) == IDYES

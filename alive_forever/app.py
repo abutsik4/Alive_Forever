@@ -27,16 +27,16 @@ import tkinter as tk
 
 from alive_forever.core.config import load_app_config, save_app_config
 from alive_forever.core.scheduler import format_transition, get_next_transition, is_schedule_active
+from alive_forever.system import startup as startup_module
 from alive_forever.system.windows import (
     APP_NAME,
     LOG_DIR,
     MUTEX_NAME,
-    ROOT_DIR,
     SingleInstance,
-    build_startup_command,
+    ask_yes_no,
+    enable_dpi_awareness,
+    get_display_scaling,
     has_console_streams,
-    is_startup_enabled,
-    set_startup_enabled,
     setup_logging,
     show_message_box,
 )
@@ -54,6 +54,7 @@ class KeepAliveApp:
     # Set on the class so the tick path stays safe regardless of how far
     # construction got; __init__ seeds the real baseline.
     _last_flush = None
+    display_scaling = 1.0
 
     def __init__(self):
         self.logger = LOGGER
@@ -75,6 +76,7 @@ class KeepAliveApp:
         self._applied_icon_state = None
         self._applied_icon_title = None
         self._last_flush = time.monotonic()
+        self._startup_status = None
 
     def now_provider(self):
         return datetime.now()
@@ -105,12 +107,46 @@ class KeepAliveApp:
             self._last_flush = current_time
         return True
 
+    def get_startup_status(self):
+        if self._startup_status is None:
+            self._startup_status = startup_module.get_startup_status()
+        return self._startup_status
+
     def is_startup_enabled(self):
-        return is_startup_enabled()
+        return self.get_startup_status().enabled
 
     def set_startup_enabled(self, enabled):
-        script_path = ROOT_DIR / "keep_alive.py"
-        set_startup_enabled(enabled, build_startup_command(script_path), self.logger)
+        self._startup_status = startup_module.set_startup_enabled(enabled, self.logger)
+        return self._startup_status
+
+    def repair_startup(self):
+        """Re-point a registration left stale by a moved folder or new interpreter."""
+        self._startup_status = startup_module.repair_startup_if_stale(self.logger)
+        return self._startup_status
+
+    def prompt_first_run(self):
+        """Offer to register auto-start once, since nobody finds the checkbox."""
+        if self.config.first_run_completed:
+            return
+
+        with self.config_lock:
+            self.config.first_run_completed = True
+
+        try:
+            if not self.get_startup_status().enabled and ask_yes_no(
+                "Start {0} automatically when you sign in to Windows?\n\n"
+                "You can change this at any time in Settings.".format(APP_NAME),
+                APP_NAME,
+            ):
+                status = self.set_startup_enabled(True)
+                self.logger.info("First-run startup registration: %s", status.label())
+        except Exception:
+            self.logger.exception("First-run startup prompt failed")
+        finally:
+            try:
+                self.save_config()
+            except Exception:
+                self.logger.exception("Could not record first-run completion")
 
     def get_runtime_state(self, now=None):
         if self.manual_paused:
@@ -337,8 +373,23 @@ class KeepAliveApp:
             return 1
 
         self.start_time = self.now_provider()
+
+        # Must happen before the first Tk window exists, or Windows will
+        # bitmap-stretch the whole UI on a scaled display.
+        awareness = enable_dpi_awareness()
+        self.display_scaling = get_display_scaling()
+        self.logger.info("DPI awareness: %s at %.2fx scaling", awareness or "none", self.display_scaling)
+        ModernStyle.apply_scaling(self.display_scaling)
+
         self.root = tk.Tk()
         self.root.withdraw()
+        try:
+            self.root.tk.call("tk", "scaling", self.display_scaling * 96.0 / 72.0)
+        except tk.TclError:
+            self.logger.debug("Could not set Tk scaling", exc_info=True)
+        self.logger.info("UI font family: %s", ModernStyle.resolve_fonts(self.root))
+
+        self.repair_startup()
 
         self.thread = threading.Thread(target=self.activity_loop, daemon=True)
         self.thread.start()
@@ -363,8 +414,9 @@ class KeepAliveApp:
         icon_thread = threading.Thread(target=self.icon.run, daemon=True)
         icon_thread.start()
 
+        self.root.after(300, self.prompt_first_run)
         if not self.config.start_minimized:
-            self.root.after(400, self._show_settings_window)
+            self.root.after(600, self._show_settings_window)
 
         self.logger.info("Alive Forever started")
         try:

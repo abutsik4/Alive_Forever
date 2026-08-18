@@ -26,13 +26,53 @@ class ModernStyle:
     SUCCESS = "#008000"
     WARNING = "#800000"
     PAUSED = "#404040"
-    FONT_FAMILY = "MS Sans Serif"
+
+    # MS Sans Serif has not shipped since Windows 98; on 10/11 Tk silently
+    # substitutes something else, so the retro look varied by machine. Ask for
+    # the closest face that is actually installed instead.
+    FONT_PREFERENCES = ("MS Sans Serif", "Microsoft Sans Serif", "Tahoma", "Segoe UI", "Arial")
+    FONT_FAMILY = "Tahoma"
+    SCALE = 1.0
+
     FONT_TITLE = (FONT_FAMILY, 18, "bold")
     FONT_SUBTITLE = (FONT_FAMILY, 10)
     FONT_BODY = (FONT_FAMILY, 10)
     FONT_BODY_BOLD = (FONT_FAMILY, 10, "bold")
     FONT_CAPTION = (FONT_FAMILY, 8, "bold")
     FONT_SMALL = (FONT_FAMILY, 8)
+
+    @classmethod
+    def apply_scaling(cls, scale):
+        """Record the display scale used for pixel-sized layout constants.
+
+        Font point sizes are deliberately left alone: Tk already scales those
+        through `tk scaling`, so multiplying here too would double-apply it.
+        """
+        cls.SCALE = max(1.0, min(3.0, float(scale)))
+
+    @classmethod
+    def resolve_fonts(cls, root):
+        """Pick the first preferred family that is actually installed."""
+        try:
+            from tkinter import font as tk_font
+
+            available = {name.lower() for name in tk_font.families(root)}
+        except Exception:
+            return cls.FONT_FAMILY
+
+        for candidate in cls.FONT_PREFERENCES:
+            if candidate.lower() in available:
+                cls.FONT_FAMILY = candidate
+                break
+
+        family = cls.FONT_FAMILY
+        cls.FONT_TITLE = (family, 18, "bold")
+        cls.FONT_SUBTITLE = (family, 10)
+        cls.FONT_BODY = (family, 10)
+        cls.FONT_BODY_BOLD = (family, 10, "bold")
+        cls.FONT_CAPTION = (family, 8, "bold")
+        cls.FONT_SMALL = (family, 8)
+        return family
 
 
 class SettingsWindow:
@@ -72,10 +112,17 @@ class SettingsWindow:
         self._mark_editor_clean()
 
     @classmethod
-    def calculate_window_geometry(cls, screen_width, screen_height):
-        width = min(cls.WINDOW_WIDTH, max(480, screen_width - cls.WINDOW_MARGIN))
-        available_height = max(cls.MIN_WINDOW_HEIGHT, screen_height - cls.WINDOW_MARGIN)
-        height = min(cls.WINDOW_HEIGHT, available_height)
+    def calculate_window_geometry(cls, screen_width, screen_height, scale=1.0):
+        """Window size in physical pixels.
+
+        With DPI awareness on, screen dimensions arrive in physical pixels and
+        Tk grows the fonts, so the pixel constants have to grow with them or
+        the content no longer fits.
+        """
+        scale = max(1.0, min(3.0, float(scale)))
+        width = min(round(cls.WINDOW_WIDTH * scale), max(round(480 * scale), screen_width - cls.WINDOW_MARGIN))
+        available_height = max(round(cls.MIN_WINDOW_HEIGHT * scale), screen_height - cls.WINDOW_MARGIN)
+        height = min(round(cls.WINDOW_HEIGHT * scale), available_height)
         x_pos = max(0, (screen_width - width) // 2)
         y_pos = max(0, (screen_height - height) // 2)
         return width, height, x_pos, y_pos
@@ -115,11 +162,13 @@ class SettingsWindow:
         self.is_open = True
 
         self.window.update_idletasks()
+        scale = getattr(self.app, "display_scaling", 1.0)
         width, height, x_pos, y_pos = self.calculate_window_geometry(
             self.window.winfo_screenwidth(),
             self.window.winfo_screenheight(),
+            scale,
         )
-        self.window.minsize(480, self.MIN_WINDOW_HEIGHT)
+        self.window.minsize(round(480 * scale), round(self.MIN_WINDOW_HEIGHT * scale))
         self.window.resizable(True, True)
         self.window.geometry("{0}x{1}+{2}+{3}".format(width, height, x_pos, y_pos))
 
@@ -254,6 +303,18 @@ class SettingsWindow:
         self.total_activity_label.pack(side=tk.LEFT)
         self.last_activity_label = tk.Label(totals_row, text="Last activity: --", font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
         self.last_activity_label.pack(side=tk.RIGHT)
+
+        self.startup_status_label = tk.Label(
+            status_card,
+            text="",
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=520,
+        )
+        self.startup_status_label.pack(fill=tk.X, pady=(6, 0))
 
         general_card = self._create_card(main_frame, "General")
 
@@ -603,10 +664,23 @@ class SettingsWindow:
             else:
                 self.last_activity_label.config(text="Last activity: --")
 
+            self._refresh_startup_display()
             self._update_schedule_preview()
             self.window.after(1000, self._refresh_runtime_display)
         except tk.TclError:
             self.is_open = False
+
+    def _refresh_startup_display(self):
+        status = self.app.get_startup_status()
+        color = ModernStyle.TEXT_DIM
+        if status.enabled and not status.healthy:
+            color = ModernStyle.WARNING
+        elif status.enabled:
+            color = ModernStyle.SUCCESS
+        self.startup_status_label.config(
+            text="Startup: {0} - {1}".format(status.label(), status.detail),
+            fg=color,
+        )
 
     def _save_settings(self):
         try:

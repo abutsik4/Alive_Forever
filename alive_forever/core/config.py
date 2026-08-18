@@ -79,6 +79,7 @@ class AppConfig:
     start_minimized: bool = True
     notifications_enabled: bool = True
     profile_name: str = "Custom"
+    first_run_completed: bool = False
     lifetime_activity_count: int = 0
     last_activity_at: Optional[datetime] = None
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig.default)
@@ -90,6 +91,7 @@ class AppConfig:
             start_minimized=self.start_minimized,
             notifications_enabled=self.notifications_enabled,
             profile_name=self.profile_name,
+            first_run_completed=self.first_run_completed,
             lifetime_activity_count=self.lifetime_activity_count,
             last_activity_at=self.last_activity_at,
             schedule=self.schedule.clone(),
@@ -102,6 +104,7 @@ class AppConfig:
             "start_minimized": self.start_minimized,
             "notifications_enabled": self.notifications_enabled,
             "profile_name": self.profile_name,
+            "first_run_completed": self.first_run_completed,
             "lifetime_activity_count": self.lifetime_activity_count,
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
             "schedule": self.schedule.to_dict(),
@@ -137,6 +140,7 @@ def config_from_raw(raw_config):
         start_minimized=bool(raw_config.get("start_minimized", True)),
         notifications_enabled=bool(raw_config.get("notifications_enabled", True)),
         profile_name=profile_name,
+        first_run_completed=bool(raw_config.get("first_run_completed", False)),
         lifetime_activity_count=max(0, int(raw_config.get("lifetime_activity_count", 0) or 0)),
         last_activity_at=parse_datetime(raw_config.get("last_activity_at")),
         schedule=schedule,
