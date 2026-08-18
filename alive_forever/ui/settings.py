@@ -3,7 +3,13 @@
 import tkinter as tk
 from tkinter import messagebox
 
-from alive_forever.core.config import PRESET_CONFIGS, VALID_ACTIVITY_TYPES, apply_preset, clamp_interval
+from alive_forever.core.config import (
+    PRESET_CONFIGS,
+    VALID_ACTIVITY_TYPES,
+    apply_preset,
+    clamp_idle_threshold,
+    clamp_interval,
+)
 from alive_forever.core.scheduler import DAY_LABELS, DAY_ORDER, ScheduleConfig, TimeWindow, describe_schedule, parse_time_string
 from alive_forever.system.windows import ICON_FILE
 
@@ -335,6 +341,38 @@ class SettingsWindow:
 
         self.notifications_var = tk.BooleanVar(value=self.app.config.notifications_enabled)
         self._create_toggle_row(general_card, "Notifications", self.notifications_var)
+
+        awake_card = self._create_card(main_frame, "Keep Awake")
+
+        tk.Label(
+            awake_card,
+            text=(
+                "These use the Windows power API directly, so they work without "
+                "faking any input. On a managed PC the lock screen may still be "
+                "enforced by company policy."
+            ),
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=520,
+        ).pack(fill=tk.X, pady=(0, 4))
+
+        self.prevent_sleep_var = tk.BooleanVar(value=self.app.config.prevent_sleep)
+        self._create_toggle_row(awake_card, "Prevent Sleep", self.prevent_sleep_var)
+
+        self.keep_display_var = tk.BooleanVar(value=self.app.config.keep_display_on)
+        self._create_toggle_row(awake_card, "Keep Screen On", self.keep_display_var)
+
+        self.idle_aware_var = tk.BooleanVar(value=self.app.config.idle_aware)
+        self._create_toggle_row(awake_card, "Only Act While You Are Away", self.idle_aware_var)
+
+        self.idle_threshold_var = tk.StringVar(value=str(self.app.config.idle_threshold))
+        self._create_entry_row(awake_card, "Consider Away After", self.idle_threshold_var, "seconds")
+
+        self.zen_jiggle_var = tk.BooleanVar(value=self.app.config.zen_jiggle)
+        self._create_toggle_row(awake_card, "Invisible Mouse Jiggle", self.zen_jiggle_var)
 
         schedule_card = self._create_card(main_frame, "Schedule")
 
@@ -693,6 +731,11 @@ class SettingsWindow:
             if activity_type not in VALID_ACTIVITY_TYPES:
                 raise ValueError("Select a valid activity type.")
 
+            raw_threshold = self.idle_threshold_var.get().strip()
+            idle_threshold = clamp_idle_threshold(raw_threshold)
+            if str(idle_threshold) != raw_threshold:
+                raise ValueError("Away threshold must be between 10 and 600 seconds.")
+
             schedule_windows = self.build_schedule_windows_for_save()
             if self.schedule_enabled_var.get() and not schedule_windows:
                 raise ValueError("Add at least one schedule window or disable scheduling.")
@@ -702,6 +745,11 @@ class SettingsWindow:
             updated_config.activity_type = activity_type
             updated_config.start_minimized = self.minimized_var.get()
             updated_config.notifications_enabled = self.notifications_var.get()
+            updated_config.prevent_sleep = self.prevent_sleep_var.get()
+            updated_config.keep_display_on = self.keep_display_var.get()
+            updated_config.idle_aware = self.idle_aware_var.get()
+            updated_config.idle_threshold = idle_threshold
+            updated_config.zen_jiggle = self.zen_jiggle_var.get()
             updated_config.profile_name = self.preset_var.get() if self.preset_var.get() in PRESET_CONFIGS else "Custom"
             updated_config.schedule = ScheduleConfig(
                 enabled=self.schedule_enabled_var.get(),

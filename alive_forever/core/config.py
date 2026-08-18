@@ -55,12 +55,23 @@ PRESET_CONFIGS = {
 }
 
 
+VALID_OVERRIDE_STATES = ("active", "paused")
+
+
 def clamp_interval(value):
     try:
         interval = int(value)
     except (TypeError, ValueError):
         return 60
     return max(10, min(300, interval))
+
+
+def clamp_idle_threshold(value):
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError):
+        return 45
+    return max(10, min(600, threshold))
 
 
 def parse_datetime(value):
@@ -80,6 +91,24 @@ class AppConfig:
     notifications_enabled: bool = True
     profile_name: str = "Custom"
     first_run_completed: bool = False
+
+    # Keep-awake is handled by Windows' own power API rather than by faking
+    # input, so it works even while the app is injecting nothing at all.
+    prevent_sleep: bool = True
+    keep_display_on: bool = False
+
+    # Only inject when the user is genuinely away, so we never fight them for
+    # the keyboard or the cursor.
+    idle_aware: bool = True
+    idle_threshold: int = 45
+
+    # Zero-pixel mouse movement: counts as input, never moves the pointer.
+    zen_jiggle: bool = True
+
+    # Temporary "stay active until" / "pause until" set from the tray.
+    override_state: Optional[str] = None
+    override_until: Optional[datetime] = None
+
     lifetime_activity_count: int = 0
     last_activity_at: Optional[datetime] = None
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig.default)
@@ -92,6 +121,13 @@ class AppConfig:
             notifications_enabled=self.notifications_enabled,
             profile_name=self.profile_name,
             first_run_completed=self.first_run_completed,
+            prevent_sleep=self.prevent_sleep,
+            keep_display_on=self.keep_display_on,
+            idle_aware=self.idle_aware,
+            idle_threshold=self.idle_threshold,
+            zen_jiggle=self.zen_jiggle,
+            override_state=self.override_state,
+            override_until=self.override_until,
             lifetime_activity_count=self.lifetime_activity_count,
             last_activity_at=self.last_activity_at,
             schedule=self.schedule.clone(),
@@ -105,6 +141,13 @@ class AppConfig:
             "notifications_enabled": self.notifications_enabled,
             "profile_name": self.profile_name,
             "first_run_completed": self.first_run_completed,
+            "prevent_sleep": self.prevent_sleep,
+            "keep_display_on": self.keep_display_on,
+            "idle_aware": self.idle_aware,
+            "idle_threshold": self.idle_threshold,
+            "zen_jiggle": self.zen_jiggle,
+            "override_state": self.override_state,
+            "override_until": self.override_until.isoformat() if self.override_until else None,
             "lifetime_activity_count": self.lifetime_activity_count,
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
             "schedule": self.schedule.to_dict(),
@@ -133,6 +176,14 @@ def config_from_raw(raw_config):
     if profile_name not in PRESET_CONFIGS:
         profile_name = "Custom"
 
+    override_state = raw_config.get("override_state")
+    if override_state not in VALID_OVERRIDE_STATES:
+        override_state = None
+    override_until = parse_datetime(raw_config.get("override_until"))
+    if override_state is None or override_until is None:
+        override_state = None
+        override_until = None
+
     schedule = ScheduleConfig.from_raw(raw_config.get("schedule", {}))
     return AppConfig(
         interval=clamp_interval(raw_config.get("interval", 60)),
@@ -141,6 +192,13 @@ def config_from_raw(raw_config):
         notifications_enabled=bool(raw_config.get("notifications_enabled", True)),
         profile_name=profile_name,
         first_run_completed=bool(raw_config.get("first_run_completed", False)),
+        prevent_sleep=bool(raw_config.get("prevent_sleep", True)),
+        keep_display_on=bool(raw_config.get("keep_display_on", False)),
+        idle_aware=bool(raw_config.get("idle_aware", True)),
+        idle_threshold=clamp_idle_threshold(raw_config.get("idle_threshold", 45)),
+        zen_jiggle=bool(raw_config.get("zen_jiggle", True)),
+        override_state=override_state,
+        override_until=override_until,
         lifetime_activity_count=max(0, int(raw_config.get("lifetime_activity_count", 0) or 0)),
         last_activity_at=parse_datetime(raw_config.get("last_activity_at")),
         schedule=schedule,

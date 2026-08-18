@@ -1,10 +1,8 @@
 """Application entrypoint and tray runtime."""
 
-import ctypes
-import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import pystray
@@ -27,7 +25,7 @@ import tkinter as tk
 
 from alive_forever.core.config import load_app_config, save_app_config
 from alive_forever.core.scheduler import format_transition, get_next_transition, is_schedule_active
-from alive_forever.system import startup as startup_module
+from alive_forever.system import presence, startup as startup_module
 from alive_forever.system.windows import (
     APP_NAME,
     LOG_DIR,
@@ -54,6 +52,7 @@ class KeepAliveApp:
     # Set on the class so the tick path stays safe regardless of how far
     # construction got; __init__ seeds the real baseline.
     _last_flush = None
+    _applied_execution_flags = None
     display_scaling = 1.0
 
     def __init__(self):
@@ -77,6 +76,7 @@ class KeepAliveApp:
         self._applied_icon_title = None
         self._last_flush = time.monotonic()
         self._startup_status = None
+        self._applied_execution_flags = None
 
     def now_provider(self):
         return datetime.now()
@@ -148,14 +148,119 @@ class KeepAliveApp:
             except Exception:
                 self.logger.exception("Could not record first-run completion")
 
+    def get_active_override(self, now=None):
+        """The temporary tray override, if one is set and hasn't expired yet."""
+        config = self.config
+        if not config.override_state or not config.override_until:
+            return None
+        if (now or self.now_provider()) >= config.override_until:
+            return None
+        return config.override_state, config.override_until
+
+    def clear_expired_override(self, now=None):
+        config = self.config
+        if not config.override_state or not config.override_until:
+            return False
+        if (now or self.now_provider()) < config.override_until:
+            return False
+
+        with self.config_lock:
+            self.config.override_state = None
+            self.config.override_until = None
+        self.logger.info("Temporary override expired")
+        return True
+
+    def set_override(self, state, minutes):
+        """Hold a state for a fixed number of minutes, e.g. 'active for 2 hours'."""
+        until = self.now_provider() + timedelta(minutes=minutes)
+        with self.config_lock:
+            self.config.override_state = state
+            self.config.override_until = until
+        if state == "active":
+            self.manual_paused = False
+        self.logger.info("Override set: %s until %s", state, until.strftime("%a %H:%M"))
+        try:
+            self.save_config()
+        except Exception:
+            self.logger.exception("Could not persist override")
+        self.refresh_runtime_state()
+
+    def clear_override(self, icon=None, item=None):
+        with self.config_lock:
+            self.config.override_state = None
+            self.config.override_until = None
+        self.logger.info("Override cleared")
+        try:
+            self.save_config()
+        except Exception:
+            self.logger.exception("Could not persist override")
+        self.refresh_runtime_state()
+
     def get_runtime_state(self, now=None):
+        now = now or self.now_provider()
+
+        override = self.get_active_override(now)
+        if override:
+            return "active" if override[0] == "active" else "manual_paused"
+
         if self.manual_paused:
             return "manual_paused"
-        return "active" if is_schedule_active(self.config.schedule, now=now or self.now_provider()) else "scheduled_off"
+        return "active" if is_schedule_active(self.config.schedule, now=now) else "scheduled_off"
+
+    def should_inject_now(self):
+        """Skip injection while the user is actually at the machine."""
+        if not self.config.idle_aware:
+            return True, 0.0
+        idle_seconds = presence.get_idle_seconds()
+        return idle_seconds >= self.config.idle_threshold, idle_seconds
+
+    def desired_execution_flags(self):
+        """Only hold Windows awake while we are actually meant to be active."""
+        if self.get_runtime_state() != "active":
+            return False, False
+        return self.config.prevent_sleep, self.config.keep_display_on
+
+    def sync_execution_state(self):
+        """Re-assert the power hold when the desired state changes.
+
+        SetThreadExecutionState is per-thread and lasts until the next call on
+        that thread, so this must run on the long-lived activity thread.
+        """
+        desired = self.desired_execution_flags()
+        if desired == self._applied_execution_flags:
+            return False
+        presence.apply_execution_state(*desired)
+        self._applied_execution_flags = desired
+        self.logger.info("Execution state: prevent_sleep=%s keep_display_on=%s", *desired)
+        return True
+
+    def describe_keep_awake(self):
+        parts = []
+        if self.config.prevent_sleep:
+            parts.append("sleep blocked")
+        if self.config.keep_display_on:
+            parts.append("screen kept on")
+        return ", ".join(parts)
 
     def get_status_presentation(self):
-        state = self.get_runtime_state()
-        transition = format_transition(get_next_transition(self.config.schedule, now=self.now_provider()))
+        now = self.now_provider()
+        state = self.get_runtime_state(now)
+        override = self.get_active_override(now)
+        transition = format_transition(get_next_transition(self.config.schedule, now=now))
+
+        if override:
+            until_text = override[1].strftime("%a %H:%M")
+            if state == "active":
+                return (
+                    "Active (until {0})".format(until_text),
+                    ModernStyle.SUCCESS,
+                    "Temporarily held active until {0}, ignoring the schedule.".format(until_text),
+                )
+            return (
+                "Paused (until {0})".format(until_text),
+                ModernStyle.TEXT_DIM,
+                "Temporarily paused until {0}.".format(until_text),
+            )
 
         if state == "manual_paused":
             return "Manually Paused", ModernStyle.TEXT_DIM, "Presence activity is paused until you resume it."
@@ -165,7 +270,16 @@ class KeepAliveApp:
                 detail = "{0} {1}".format(detail, transition)
             return "Scheduled Off", ModernStyle.WARNING, detail
 
-        detail = "Simulating activity every {0} seconds using {1}.".format(self.config.interval, self.config.activity_type)
+        if self.config.idle_aware:
+            detail = "Activity every {0}s using {1}, only while you are away for {2}s or more.".format(
+                self.config.interval, self.config.activity_type, self.config.idle_threshold
+            )
+        else:
+            detail = "Activity every {0}s using {1}.".format(self.config.interval, self.config.activity_type)
+
+        keep_awake = self.describe_keep_awake()
+        if keep_awake:
+            detail = "{0} Windows {1}.".format(detail, keep_awake)
         if transition:
             detail = "{0} {1}".format(detail, transition)
         return "Active", ModernStyle.SUCCESS, detail
@@ -272,16 +386,10 @@ class KeepAliveApp:
     def simulate_activity(self):
         try:
             if self.config.activity_type in ("F15 Key (Recommended)", "Both"):
-                virtual_key = 0x7E
-                key_up = 0x0002
-                ctypes.windll.user32.keybd_event(virtual_key, 0, 0, 0)
-                ctypes.windll.user32.keybd_event(virtual_key, 0, key_up, 0)
+                presence.send_key()
 
             if self.config.activity_type in ("Mouse Jiggle", "Both"):
-                mouse_move = 0x0001
-                ctypes.windll.user32.mouse_event(mouse_move, 1, 0, 0, 0)
-                time.sleep(0.05)
-                ctypes.windll.user32.mouse_event(mouse_move, -1, 0, 0, 0)
+                presence.send_mouse_jiggle(zen=self.config.zen_jiggle)
 
             self.activity_count += 1
             with self.config_lock:
@@ -298,14 +406,20 @@ class KeepAliveApp:
         next_run = time.monotonic()
         self.refresh_runtime_state(notify=False)
 
-        while not self.shutdown_event.is_set():
-            next_run = self.process_activity_tick(next_run)
-            self.shutdown_event.wait(1)
+        try:
+            while not self.shutdown_event.is_set():
+                next_run = self.process_activity_tick(next_run)
+                self.shutdown_event.wait(1)
+        finally:
+            # The hold is bound to this thread, so drop it before we leave.
+            presence.release_execution_state()
 
     def process_activity_tick(self, next_run, now_monotonic=None):
         current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        self.clear_expired_override()
         current_state = self.get_runtime_state()
         self.refresh_runtime_state()
+        self.sync_execution_state()
         self.flush_config_if_due(current_time)
 
         if current_state != "active":
@@ -317,10 +431,56 @@ class KeepAliveApp:
         if self.get_runtime_state() != "active":
             return current_time
 
+        should_inject, idle_seconds = self.should_inject_now()
+        if not should_inject:
+            # Check again shortly rather than skipping a whole interval, so we
+            # inject promptly once the user steps away.
+            self.logger.debug("User active (%.0fs idle); skipping injection", idle_seconds)
+            return current_time + min(self.config.interval, 15)
+
         self.simulate_activity()
         return current_time + self.config.interval
 
+    # The tray is the app for most sessions, so it carries the things people
+    # reach for daily rather than just Pause / Settings / Quit.
+    OVERRIDE_CHOICES = (("30 minutes", 30), ("1 hour", 60), ("2 hours", 120), ("4 hours", 240))
+
+    def build_tray_menu(self):
+        def stay_active(minutes):
+            return lambda icon=None, item=None: self.set_override("active", minutes)
+
+        def pause_for(minutes):
+            return lambda icon=None, item=None: self.set_override("paused", minutes)
+
+        return pystray.Menu(
+            pystray.MenuItem(lambda _: self.get_status_presentation()[0], None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(lambda _: "Resume" if self.manual_paused else "Pause", self.toggle_state, default=True),
+            pystray.MenuItem(
+                "Stay active for",
+                pystray.Menu(*[pystray.MenuItem(label, stay_active(minutes)) for label, minutes in self.OVERRIDE_CHOICES]),
+            ),
+            pystray.MenuItem(
+                "Pause for",
+                pystray.Menu(*[pystray.MenuItem(label, pause_for(minutes)) for label, minutes in self.OVERRIDE_CHOICES]),
+            ),
+            pystray.MenuItem(
+                "Clear timer",
+                self.clear_override,
+                visible=lambda _: self.get_active_override() is not None,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Settings", self.open_settings),
+            pystray.MenuItem("Quit", self.quit_app),
+        )
+
     def toggle_state(self, icon=None, item=None):
+        # An explicit Pause/Resume overrules whatever timer was running.
+        if self.get_active_override():
+            with self.config_lock:
+                self.config.override_state = None
+                self.config.override_until = None
+
         self.manual_paused = not self.manual_paused
         self.logger.info("Manual pause toggled: %s", self.manual_paused)
         self.refresh_runtime_state()
@@ -394,12 +554,7 @@ class KeepAliveApp:
         self.thread = threading.Thread(target=self.activity_loop, daemon=True)
         self.thread.start()
 
-        menu = pystray.Menu(
-            pystray.MenuItem(lambda _: "Resume" if self.manual_paused else "Pause", self.toggle_state, default=True),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Settings", self.open_settings),
-            pystray.MenuItem("Quit", self.quit_app),
-        )
+        menu = self.build_tray_menu()
 
         initial_state = self.get_runtime_state()
         self.icon = pystray.Icon(
