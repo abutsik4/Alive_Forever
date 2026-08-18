@@ -9,12 +9,19 @@ from datetime import datetime
 try:
     import pystray
     from PIL import Image, ImageDraw
-except ImportError:
-    import subprocess
+except ImportError as import_error:  # pragma: no cover - depends on the environment
+    import ctypes as _ctypes
 
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pystray", "pillow"])
-    import pystray
-    from PIL import Image, ImageDraw
+    _ctypes.windll.user32.MessageBoxW(
+        None,
+        "Alive Forever needs its dependencies installed.\n\n"
+        "Run this from the project folder:\n\n"
+        "    pip install -r requirements.txt\n\n"
+        "Missing: {0}".format(import_error.name or import_error),
+        "Alive Forever",
+        0x10,
+    )
+    raise SystemExit(1)
 
 import tkinter as tk
 
@@ -27,6 +34,7 @@ from alive_forever.system.windows import (
     ROOT_DIR,
     SingleInstance,
     build_startup_command,
+    has_console_streams,
     is_startup_enabled,
     set_startup_enabled,
     setup_logging,
@@ -37,10 +45,19 @@ from alive_forever.ui.settings import ModernStyle, SettingsWindow
 
 LOGGER = setup_logging()
 
+# How often the activity loop flushes counters to disk, so a hard kill costs
+# at most this much of the lifetime tally.
+CONFIG_FLUSH_SECONDS = 120
+
 
 class KeepAliveApp:
+    # Set on the class so the tick path stays safe regardless of how far
+    # construction got; __init__ seeds the real baseline.
+    _last_flush = None
+
     def __init__(self):
         self.logger = LOGGER
+        self.config_lock = threading.RLock()
         self.config = load_app_config(self.logger)
         self.manual_paused = False
         self.shutdown_event = threading.Event()
@@ -54,17 +71,39 @@ class KeepAliveApp:
         self.start_time = None
         self._last_status = None
         self._shutdown_complete = False
+        self._icon_cache = {}
+        self._applied_icon_state = None
+        self._applied_icon_title = None
+        self._last_flush = time.monotonic()
 
     def now_provider(self):
         return datetime.now()
 
     def apply_config(self, config):
-        self.config = config
-        save_app_config(self.config, self.logger)
+        with self.config_lock:
+            self.config = config
+            save_app_config(self.config, self.logger)
         self.refresh_runtime_state(notify=False)
 
     def save_config(self):
-        save_app_config(self.config, self.logger)
+        with self.config_lock:
+            save_app_config(self.config, self.logger)
+        self._last_flush = time.monotonic()
+
+    def flush_config_if_due(self, now_monotonic=None):
+        """Persist counters periodically so a kill or reboot doesn't discard them."""
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        if self._last_flush is None:
+            self._last_flush = current_time
+            return False
+        if current_time - self._last_flush < CONFIG_FLUSH_SECONDS:
+            return False
+        try:
+            self.save_config()
+        except Exception:
+            self.logger.exception("Periodic config flush failed")
+            self._last_flush = current_time
+        return True
 
     def is_startup_enabled(self):
         return is_startup_enabled()
@@ -108,6 +147,12 @@ class KeepAliveApp:
             self.icon.notify(message, title or APP_NAME)
         except Exception:
             self.logger.debug("Tray notification not available", exc_info=True)
+
+    def get_icon_image(self, state):
+        """Icons are static per state, so build each one once and reuse it."""
+        if state not in self._icon_cache:
+            self._icon_cache[state] = self.create_icon_image(state)
+        return self._icon_cache[state]
 
     def create_icon_image(self, state):
         size = 64
@@ -154,11 +199,22 @@ class KeepAliveApp:
         return image
 
     def update_icon(self):
+        """Only touch the tray when something the user can see actually changed."""
         if not self.icon:
             return
+
         state = self.get_runtime_state()
-        self.icon.icon = self.create_icon_image(state)
-        self.icon.title = self.get_tray_title()
+        title = self.get_tray_title()
+        if state == self._applied_icon_state and title == self._applied_icon_title:
+            return
+
+        if state != self._applied_icon_state:
+            self.icon.icon = self.get_icon_image(state)
+            self._applied_icon_state = state
+
+        self.icon.title = title
+        self._applied_icon_title = title
+
         try:
             self.icon.update_menu()
         except Exception:
@@ -192,9 +248,11 @@ class KeepAliveApp:
                 ctypes.windll.user32.mouse_event(mouse_move, -1, 0, 0, 0)
 
             self.activity_count += 1
-            self.config.lifetime_activity_count += 1
-            self.config.last_activity_at = self.now_provider()
-            self.logger.info("Simulated activity #%s using %s", self.config.lifetime_activity_count, self.config.activity_type)
+            with self.config_lock:
+                self.config.lifetime_activity_count += 1
+                self.config.last_activity_at = self.now_provider()
+                lifetime = self.config.lifetime_activity_count
+            self.logger.info("Simulated activity #%s using %s", lifetime, self.config.activity_type)
             return True
         except Exception:
             self.logger.exception("Activity simulation failed")
@@ -212,6 +270,7 @@ class KeepAliveApp:
         current_time = time.monotonic() if now_monotonic is None else now_monotonic
         current_state = self.get_runtime_state()
         self.refresh_runtime_state()
+        self.flush_config_if_due(current_time)
 
         if current_state != "active":
             return current_time
@@ -291,12 +350,15 @@ class KeepAliveApp:
             pystray.MenuItem("Quit", self.quit_app),
         )
 
+        initial_state = self.get_runtime_state()
         self.icon = pystray.Icon(
             "alive_forever",
-            self.create_icon_image(self.get_runtime_state()),
+            self.get_icon_image(initial_state),
             self.get_tray_title(),
             menu,
         )
+        self._applied_icon_state = initial_state
+        self._applied_icon_title = self.icon.title
 
         icon_thread = threading.Thread(target=self.icon.run, daemon=True)
         icon_thread.start()
@@ -313,12 +375,13 @@ class KeepAliveApp:
 
 
 def main():
-    print("=" * 50)
-    print("  {0} - MS Teams Status Keeper".format(APP_NAME))
-    print("=" * 50)
-    print("The app runs in your system tray.")
-    print("Logs: {0}".format(LOG_DIR / "alive_forever.log"))
-    print("-" * 50)
+    if has_console_streams():
+        print("=" * 50)
+        print("  {0} - Keep Awake & Teams Presence".format(APP_NAME))
+        print("=" * 50)
+        print("The app runs in your system tray.")
+        print("Logs: {0}".format(LOG_DIR / "alive_forever.log"))
+        print("-" * 50)
 
     app = KeepAliveApp()
     return app.run()

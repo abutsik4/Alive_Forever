@@ -41,6 +41,10 @@ class SettingsWindow:
     MIN_WINDOW_HEIGHT = 520
     WINDOW_MARGIN = 80
 
+    # Class-level default so the editor-commit logic is safe to reason about
+    # even before the widgets that drive the flag exist.
+    _editor_dirty = False
+
     def __init__(self, app):
         self.app = app
         self.window = None
@@ -51,6 +55,21 @@ class SettingsWindow:
         self._content_canvas = None
         self._content_frame = None
         self._content_scrollbar = None
+        self._editor_dirty = False
+
+    def _mark_editor_dirty(self, *_args):
+        self._editor_dirty = True
+
+    def _mark_editor_clean(self):
+        self._editor_dirty = False
+
+    def _track_editor_vars(self):
+        """Watch the window editor so we know whether it holds uncommitted input."""
+        self.window_start_var.trace_add("write", self._mark_editor_dirty)
+        self.window_end_var.trace_add("write", self._mark_editor_dirty)
+        for day_var in self.window_day_vars.values():
+            day_var.trace_add("write", self._mark_editor_dirty)
+        self._mark_editor_clean()
 
     @classmethod
     def calculate_window_geometry(cls, screen_width, screen_height):
@@ -62,6 +81,7 @@ class SettingsWindow:
         return width, height, x_pos, y_pos
 
     def build_schedule_windows_for_save(self):
+        """Fold the editor fields into the window list so typed edits are never lost."""
         windows = [TimeWindow(**window.to_dict()) for window in self.draft_windows]
 
         if not hasattr(self, "window_start_var") or not hasattr(self, "window_end_var") or not hasattr(self, "windows_listbox"):
@@ -70,6 +90,12 @@ class SettingsWindow:
         selection = self.windows_listbox.curselection()
         if selection:
             windows[selection[0]] = self._window_from_editor()
+        elif self._editor_dirty:
+            # The user typed a window but never pressed Add; committing it is far
+            # less surprising than silently throwing the input away.
+            candidate = self._window_from_editor()
+            if candidate.to_dict() not in [window.to_dict() for window in windows]:
+                windows.append(candidate)
         return windows
 
     def show(self):
@@ -314,6 +340,8 @@ class SettingsWindow:
             )
             check.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 10), pady=(0, 6))
 
+        self._track_editor_vars()
+
         self.schedule_preview_label = tk.Label(
             schedule_card,
             text="",
@@ -493,11 +521,13 @@ class SettingsWindow:
         self.window_end_var.set(window.end)
         for day_code in DAY_ORDER:
             self.window_day_vars[day_code].set(day_code in window.days)
+        self._mark_editor_clean()
 
     def _add_window(self):
         try:
             self.draft_windows.append(self._window_from_editor())
             self._populate_windows_list()
+            self._mark_editor_clean()
         except ValueError as error:
             messagebox.showerror("Error", str(error))
 
@@ -510,6 +540,7 @@ class SettingsWindow:
             self.draft_windows[selection[0]] = self._window_from_editor()
             self._populate_windows_list()
             self.windows_listbox.selection_set(selection[0])
+            self._mark_editor_clean()
         except ValueError as error:
             messagebox.showerror("Error", str(error))
 
@@ -535,6 +566,7 @@ class SettingsWindow:
             self.window_end_var.set(first_window.end)
             for day_code in DAY_ORDER:
                 self.window_day_vars[day_code].set(day_code in first_window.days)
+        self._mark_editor_clean()
 
     def _update_schedule_preview(self):
         preview_schedule = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=list(self.draft_windows))
@@ -602,14 +634,32 @@ class SettingsWindow:
                 windows=schedule_windows,
             )
 
-            self.app.set_startup_enabled(self.startup_var.get())
+            # Apply the config first: it is the part that cannot fail, so a
+            # registry problem below can no longer discard the user's edits.
             self.app.apply_config(updated_config)
-            messagebox.showinfo("Saved", "Settings saved successfully.")
+            self.draft_windows = [TimeWindow(**window.to_dict()) for window in updated_config.schedule.windows]
+            self._populate_windows_list()
+            self._mark_editor_clean()
         except ValueError as error:
             messagebox.showerror("Error", str(error))
+            return
         except Exception as error:
             self.app.logger.exception("Could not save settings")
             messagebox.showerror("Error", "Could not save settings:\n{0}".format(error))
+            return
+
+        try:
+            self.app.set_startup_enabled(self.startup_var.get())
+        except Exception as error:
+            self.app.logger.exception("Could not update startup registration")
+            messagebox.showwarning(
+                "Startup not changed",
+                "Your settings were saved, but Windows startup could not be updated:\n\n{0}".format(error),
+            )
+            self.startup_var.set(self.app.is_startup_enabled())
+            return
+
+        messagebox.showinfo("Saved", "Settings saved successfully.")
 
     def _on_close(self):
         self.is_open = False

@@ -51,6 +51,38 @@ class SettingsWindowSaveTests(unittest.TestCase):
         self.assertEqual("17:00", schedule_windows[0].end)
         self.assertEqual(["mon"], schedule_windows[0].days)
 
+    def test_untouched_editor_adds_nothing(self):
+        window = self._build_window(selection=(), start="09:00", end="17:00", selected_days=["mon"])
+
+        self.assertEqual(1, len(window.build_schedule_windows_for_save()))
+
+    def test_dirty_editor_without_selection_is_committed_instead_of_discarded(self):
+        window = self._build_window(selection=(), start="19:00", end="22:00", selected_days=["sat", "sun"])
+        window._editor_dirty = True
+
+        schedule_windows = window.build_schedule_windows_for_save()
+
+        self.assertEqual(2, len(schedule_windows))
+        self.assertEqual("09:00", schedule_windows[0].start)
+        self.assertEqual("19:00", schedule_windows[1].start)
+        self.assertEqual("22:00", schedule_windows[1].end)
+        self.assertEqual(["sat", "sun"], schedule_windows[1].days)
+
+    def test_dirty_editor_matching_an_existing_window_is_not_duplicated(self):
+        window = self._build_window(selection=(), start="09:00", end="17:00", selected_days=["mon"])
+        window._editor_dirty = True
+
+        schedule_windows = window.build_schedule_windows_for_save()
+
+        self.assertEqual(1, len(schedule_windows))
+
+    def test_dirty_editor_with_no_days_selected_raises(self):
+        window = self._build_window(selection=(), start="19:00", end="22:00", selected_days=[])
+        window._editor_dirty = True
+
+        with self.assertRaises(ValueError):
+            window.build_schedule_windows_for_save()
+
 
 if __name__ == "__main__":
     unittest.main()

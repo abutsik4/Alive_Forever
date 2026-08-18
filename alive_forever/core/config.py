@@ -6,7 +6,12 @@ from datetime import datetime
 from typing import Optional
 
 from alive_forever.core.scheduler import ScheduleConfig, TimeWindow
-from alive_forever.system.windows import CONFIG_FILE, LEGACY_CONFIG_FILE, ensure_app_directories
+from alive_forever.system.windows import (
+    CONFIG_FILE,
+    LEGACY_CONFIG_FILE,
+    ensure_app_directories,
+    write_json_atomic,
+)
 
 
 VALID_ACTIVITY_TYPES = ["F15 Key (Recommended)", "Mouse Jiggle", "Both"]
@@ -138,23 +143,38 @@ def config_from_raw(raw_config):
     )
 
 
+def quarantine_config(source_file, logger):
+    """Move an unreadable config aside so the user can inspect what was lost."""
+    try:
+        backup = source_file.with_suffix(source_file.suffix + ".bad")
+        if backup.exists():
+            backup.unlink()
+        source_file.rename(backup)
+        logger.warning("Config at %s was unreadable; moved it to %s", source_file, backup)
+    except OSError:
+        logger.exception("Could not quarantine unreadable config at %s", source_file)
+
+
 def load_app_config(logger):
     source_file = None
     raw_config = {}
 
-    try:
-        if CONFIG_FILE.exists():
-            source_file = CONFIG_FILE
-        elif LEGACY_CONFIG_FILE.exists():
-            source_file = LEGACY_CONFIG_FILE
+    if CONFIG_FILE.exists():
+        source_file = CONFIG_FILE
+    elif LEGACY_CONFIG_FILE.exists():
+        source_file = LEGACY_CONFIG_FILE
 
-        if source_file:
+    if source_file:
+        try:
             with open(source_file, "r", encoding="utf-8") as handle:
                 raw_config = json.load(handle)
+            if not isinstance(raw_config, dict):
+                raise ValueError("Config root must be a JSON object")
             logger.info("Loaded configuration from %s", source_file)
-    except Exception:
-        logger.exception("Could not load config; using defaults")
-        raw_config = {}
+        except Exception:
+            logger.exception("Could not load config from %s; using defaults", source_file)
+            quarantine_config(source_file, logger)
+            raw_config = {}
 
     config = config_from_raw(raw_config)
     if source_file == LEGACY_CONFIG_FILE:
@@ -165,6 +185,5 @@ def load_app_config(logger):
 
 def save_app_config(config, logger):
     ensure_app_directories()
-    with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
-        json.dump(config.to_dict(), handle, indent=2)
-    logger.info("Saved configuration to %s", CONFIG_FILE)
+    write_json_atomic(CONFIG_FILE, config.to_dict())
+    logger.debug("Saved configuration to %s", CONFIG_FILE)
