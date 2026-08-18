@@ -56,15 +56,16 @@ Section "${APP_NAME} (required)" SEC_CORE
 SectionEnd
 
 Section "Start automatically at sign-in" SEC_STARTUP
-    ; A logon task survives more environments than the Run key, which users can
-    ; silently disable from Task Manager's Startup tab. The 30 second delay
-    ; keeps the app out of the boot storm.
-    nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Create /TN "${TASK_NAME}" /TR "\"$INSTDIR\${APP_EXE}\"" /SC ONLOGON /RL LIMITED /DELAY 0000:30 /F'
+    ; Delegated to the app rather than calling schtasks here, because
+    ; `schtasks /Create /SC ONLOGON` requires elevation and this installer runs
+    ; as the user. The app registers a per-user logon task from an XML
+    ; definition, which does not, and falls back to the Run key by itself.
+    nsExec::ExecToStack '"$INSTDIR\${APP_EXE}" --register-startup'
     Pop $0
     Pop $1
     ${If} $0 != 0
-        ; Task creation refused (policy, locked-down machine); fall back so the
-        ; user still gets auto-start rather than a silent no-op.
+        ; Even the app's fallback failed (locked-down machine, policy); write
+        ; the Run key directly so the user still gets auto-start.
         WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}" '"$INSTDIR\${APP_EXE}"'
     ${EndIf}
 SectionEnd
@@ -75,7 +76,17 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
-    ; Clear both auto-start mechanisms, whichever one took effect.
+    ; Ask the running copy to quit so its files are not locked below.
+    nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /IM "${APP_EXE}" /F'
+    Pop $0
+    Pop $1
+
+    ; Clear auto-start before the exe is deleted, since the app removes its own
+    ; registration. The schtasks and Run key lines below are belt and braces for
+    ; an install that used the direct fallback.
+    nsExec::ExecToStack '"$INSTDIR\${APP_EXE}" --unregister-startup'
+    Pop $0
+    Pop $1
     nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Delete /TN "${TASK_NAME}" /F'
     Pop $0
     Pop $1

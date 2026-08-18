@@ -278,6 +278,21 @@ Either way the entry is validated on every launch - if you move the folder or
 reinstall Python, it repairs itself instead of quietly failing, and the Status
 card shows whether startup is **registered**, **broken**, or **off**.
 
+## Command Line
+
+| Flag | Effect |
+|------|--------|
+| `--paused` | Start paused for this session only |
+| `--minimized` | Start without opening the settings window |
+| `--preset NAME` | Apply a preset (`Always On`, `Workday`, `Evening`, `Focus`, `Custom`) |
+| `--register-startup` | Register auto-start and exit |
+| `--unregister-startup` | Remove auto-start and exit |
+| `--startup-status` | Report whether auto-start is registered (exit 0 if healthy) |
+
+The installer uses `--register-startup` rather than calling `schtasks` itself,
+because `schtasks /Create /SC ONLOGON` needs elevation while registering a
+per-user logon task from an XML definition does not.
+
 ## Help Topics
 
 **Q: Will this get me in trouble at work?**

@@ -1,5 +1,6 @@
 """Application entrypoint and tray runtime."""
 
+import argparse
 import threading
 import time
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ except ImportError as import_error:  # pragma: no cover - depends on the environ
 
 import tkinter as tk
 
-from alive_forever.core.config import load_app_config, save_app_config
+from alive_forever.core.config import PRESET_CONFIGS, apply_preset, load_app_config, save_app_config
 from alive_forever.core.scheduler import format_transition, get_next_transition, is_schedule_active
 from alive_forever.system import presence, startup as startup_module
 from alive_forever.system.windows import (
@@ -54,6 +55,7 @@ class KeepAliveApp:
     _last_flush = None
     _applied_execution_flags = None
     display_scaling = 1.0
+    start_minimized_override = False
 
     def __init__(self):
         self.logger = LOGGER
@@ -77,6 +79,7 @@ class KeepAliveApp:
         self._last_flush = time.monotonic()
         self._startup_status = None
         self._applied_execution_flags = None
+        self.start_minimized_override = False
 
     def now_provider(self):
         return datetime.now()
@@ -106,6 +109,28 @@ class KeepAliveApp:
             self.logger.exception("Periodic config flush failed")
             self._last_flush = current_time
         return True
+
+    def apply_launch_options(self, args):
+        """Apply one-off command line options to this run.
+
+        These affect the session only -- --paused should not permanently pause
+        the app -- except --preset, which is an explicit configuration change.
+        """
+        if getattr(args, "paused", False):
+            self.manual_paused = True
+
+        if getattr(args, "minimized", False):
+            self.start_minimized_override = True
+
+        preset = getattr(args, "preset", None)
+        if preset:
+            with self.config_lock:
+                apply_preset(self.config, preset)
+            self.logger.info("Applied preset from command line: %s", preset)
+            try:
+                self.save_config()
+            except Exception:
+                self.logger.exception("Could not persist preset from command line")
 
     def get_startup_status(self):
         if self._startup_status is None:
@@ -570,7 +595,7 @@ class KeepAliveApp:
         icon_thread.start()
 
         self.root.after(300, self.prompt_first_run)
-        if not self.config.start_minimized:
+        if not self.config.start_minimized and not self.start_minimized_override:
             self.root.after(600, self._show_settings_window)
 
         self.logger.info("Alive Forever started")
@@ -581,7 +606,85 @@ class KeepAliveApp:
         return 0
 
 
-def main():
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="AliveForever",
+        description="Keeps your PC awake and your Teams status green.",
+    )
+    parser.add_argument(
+        "--register-startup",
+        action="store_true",
+        help="Register auto-start and exit. Used by the installer.",
+    )
+    parser.add_argument(
+        "--unregister-startup",
+        action="store_true",
+        help="Remove auto-start and exit. Used by the uninstaller.",
+    )
+    parser.add_argument(
+        "--startup-status",
+        action="store_true",
+        help="Print whether auto-start is registered, and exit.",
+    )
+    parser.add_argument("--paused", action="store_true", help="Start paused.")
+    parser.add_argument("--minimized", action="store_true", help="Start without opening the settings window.")
+    parser.add_argument("--preset", choices=sorted(PRESET_CONFIGS), help="Apply a preset on launch.")
+    return parser
+
+
+def run_startup_command(args):
+    """Handle the registration flags without starting the tray.
+
+    The installer drives startup registration through here rather than calling
+    schtasks itself: `schtasks /Create /SC ONLOGON` needs elevation, whereas
+    registering a per-user task from an XML definition -- what
+    system/startup.py does -- does not.
+
+    The packaged exe is windowed and so has no stdout for a caller to read;
+    the exit code is the contract.
+    """
+    if args.register_startup:
+        try:
+            status = startup_module.set_startup_enabled(True, LOGGER)
+        except Exception:
+            LOGGER.exception("Could not register startup")
+            return 1
+        if has_console_streams():
+            print("Startup: {0} - {1}".format(status.label(), status.detail))
+        return 0 if status.enabled else 1
+
+    if args.unregister_startup:
+        try:
+            startup_module.set_startup_enabled(False, LOGGER)
+        except Exception:
+            LOGGER.exception("Could not unregister startup")
+            return 1
+        if has_console_streams():
+            print("Startup removed.")
+        return 0
+
+    status = startup_module.get_startup_status()
+    if has_console_streams():
+        print("Startup: {0} - {1}".format(status.label(), status.detail))
+        if status.command:
+            print("Command: {0}".format(status.command))
+    return 0 if status.enabled and status.healthy else 1
+
+
+def main(argv=None):
+    parser = build_arg_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exit_error:
+        # A windowed build has no stderr for argparse to complain to, so make
+        # a bad invocation visible instead of silently doing nothing.
+        if not has_console_streams():
+            show_message_box("Unrecognised command line option.", APP_NAME, 0x10)
+        return int(exit_error.code or 0)
+
+    if args.register_startup or args.unregister_startup or args.startup_status:
+        return run_startup_command(args)
+
     if has_console_streams():
         print("=" * 50)
         print("  {0} - Keep Awake & Teams Presence".format(APP_NAME))
@@ -591,4 +694,5 @@ def main():
         print("-" * 50)
 
     app = KeepAliveApp()
+    app.apply_launch_options(args)
     return app.run()
