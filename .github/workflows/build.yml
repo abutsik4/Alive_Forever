@@ -90,8 +90,20 @@ jobs:
         run: choco install nsis -y --no-progress
 
       - name: Build installer
+        shell: pwsh
         run: |
-          & "$env:ProgramFiles(x86)\NSIS\makensis.exe" installer\AliveForever.nsi
+          # Note the braces: "$env:ProgramFiles(x86)" parses as $env:ProgramFiles
+          # followed by a literal "(x86)", yielding "C:\Program Files(x86)".
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) {
+            $found = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($found) { $makensis = $found.Source }
+            else { throw "makensis not found at $makensis or on PATH." }
+          }
+          Write-Host "Using $makensis"
+          & $makensis installer\AliveForever.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE." }
+          if (-not (Test-Path dist\AliveForever-Setup.exe)) { throw "Installer was not produced." }
 
       - name: Package portable zip
         shell: pwsh
