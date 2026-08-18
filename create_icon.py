@@ -51,7 +51,7 @@ def create_icon():
     img.save(output_png, 'PNG')
     icon_image = img.resize((256, 256), Image.Resampling.LANCZOS)
     icon_image.save(output_ico, format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])
-    print('✓ Generated icon.png and icon.ico')
+    print('Generated icon.png and icon.ico')
 
 if __name__ == '__main__':
     create_icon()

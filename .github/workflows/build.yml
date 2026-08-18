@@ -1,0 +1,130 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  build:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Generate icon
+        run: python create_icon.py
+
+      - name: Build application
+        run: python -m PyInstaller --noconfirm --clean AliveForever.spec
+
+      - name: Verify the build actually starts
+        shell: pwsh
+        run: |
+          # A frozen app can fail at import time in ways the build never sees
+          # (a wrongly excluded module, a missing hidden import). Launch it and
+          # require that it reaches "Alive Forever started" in its log.
+          $log = "$env:APPDATA\AliveForever\logs\alive_forever.log"
+          New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+          if (Test-Path $log) { Remove-Item $log -Force }
+
+          # Skip the first-run prompt so nothing waits on a click.
+          $cfgDir = "$env:APPDATA\AliveForever"
+          '{ "first_run_completed": true, "start_minimized": true }' |
+            Out-File -Encoding utf8 "$cfgDir\config.json"
+
+          $proc = Start-Process -PassThru ".\dist\AliveForever\AliveForever.exe"
+          $started = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 1
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'Alive Forever started' -Quiet)) {
+              $started = $true
+              break
+            }
+            if ($proc.HasExited) { break }
+          }
+
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+
+          if (Test-Path $log) { Write-Host "--- log ---"; Get-Content $log }
+          if (-not $started) {
+            throw "The built application did not start (exit code: $($proc.ExitCode))."
+          }
+          Write-Host "Startup verified."
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build installer
+        run: |
+          & "$env:ProgramFiles(x86)\NSIS\makensis.exe" installer\AliveForever.nsi
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\AliveForever\* -DestinationPath dist\AliveForever-portable.zip
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          # Published alongside the binaries so users can verify what they ran,
+          # which matters more than usual for an unsigned installer.
+          Get-ChildItem dist\*.exe, dist\*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)"
+          } | Out-File -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AliveForever
+          path: |
+            dist/AliveForever-Setup.exe
+            dist/AliveForever-portable.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/AliveForever-Setup.exe
+            dist/AliveForever-portable.zip
+            dist/SHA256SUMS.txt

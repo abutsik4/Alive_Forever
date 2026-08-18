@@ -118,6 +118,18 @@ class ConfigLoadTests(unittest.TestCase):
         self.assertTrue(config_module.CONFIG_FILE.exists())
 
 
+class PresetMigrationTests(unittest.TestCase):
+    def test_stealth_preset_migrates_to_focus(self):
+        self.assertEqual("Focus", config_module.config_from_raw({"profile_name": "Stealth"}).profile_name)
+
+    def test_known_presets_survive(self):
+        for name in ("Custom", "Always On", "Workday", "Evening", "Focus"):
+            self.assertEqual(name, config_module.config_from_raw({"profile_name": name}).profile_name)
+
+    def test_unknown_preset_falls_back_to_custom(self):
+        self.assertEqual("Custom", config_module.config_from_raw({"profile_name": "Nope"}).profile_name)
+
+
 class ClampIntervalTests(unittest.TestCase):
     def test_clamps_to_supported_range(self):
         self.assertEqual(10, config_module.clamp_interval(1))

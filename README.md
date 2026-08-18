@@ -19,6 +19,7 @@
 </p>
 
 <p align="center">
+  <img src="https://github.com/abutsik4/Alive_Forever/actions/workflows/build.yml/badge.svg" alt="Build">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-000080?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/Python-3.8%2B-c0c0c0?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/Theme-Windows%2095-808080?style=flat-square" alt="Theme">
@@ -35,20 +36,23 @@
 +---------------------------+
 ```
 
-- Always Active: Keeps Teams showing green "Available" status.
-- System Tray App: Runs silently in the background.
-- Retro Control Panel UI: Windows 95-inspired configuration panel.
-- Multiple Activity Types: F15 key (invisible) or mouse jiggle.
-- Configurable Interval: Set activity frequency from 10 to 300 seconds.
+- Keeps Teams Green: Stops the automatic switch to "Away".
+- Real Keep-Awake: Blocks sleep and optionally display blanking through the
+  Windows power API, with no simulated input involved.
+- Stays Out Of Your Way: Only injects input once you have genuinely been idle,
+  so it never fights you for the keyboard or the cursor.
+- Invisible Mouse Jiggle: Zero-pixel movement that Windows counts as input but
+  that never moves your pointer.
+- Quick Timers: "Stay active for 2 hours" straight from the tray menu.
 - Time-Based Schedule: Choose exactly when the app should stay active.
-- Built-In Presets: Start from Always On, Workday, Evening, or Stealth.
-- Windows Startup: Optional auto-start with Windows.
-- Tray Notifications: See schedule and state changes without opening settings.
+- Built-In Presets: Start from Always On, Workday, Evening, or Focus.
+- Self-Healing Startup: Registers a logon task, checks it still works on every
+  launch, and repairs it if you move the folder.
+- Retro Control Panel UI: Windows 95-inspired, and DPI-aware so it stays sharp.
 - Live Stats: Track session and lifetime activity counts.
 - Persistent Logs: Troubleshoot silent mode from a rotating log file.
-- Persistent Settings: Your preferences are saved automatically.
 
-## Setup Wizard
+## Install
 
 ```text
 +---------------------------+
@@ -56,31 +60,69 @@
 +---------------------------+
 ```
 
-### Option 1: Double-Click Launch
+### Option 1: Installer (recommended)
 
-1. **Download** or clone this repository
-2. **Double-click** `run.bat`
-3. Done! Look for the **retro desktop-style icon** in your system tray
+Download **`AliveForever-Setup.exe`** from the
+[latest release](https://github.com/abutsik4/Alive_Forever/releases/latest)
+and run it. No Python required.
 
-### Option 2: Manual Python Launch
+The installer offers a **"Start automatically at sign-in"** option - leave it
+ticked and you never have to launch the app by hand again.
+
+> **SmartScreen warning:** the installer is not code-signed, so Windows will
+> show a "Windows protected your PC" screen. Click **More info** then
+> **Run anyway**. Every release publishes `SHA256SUMS.txt` so you can verify
+> the download first:
+>
+> ```powershell
+> Get-FileHash .\AliveForever-Setup.exe -Algorithm SHA256
+> ```
+
+### Option 2: Portable
+
+Download **`AliveForever-portable.zip`**, extract it anywhere, and run
+`AliveForever.exe`. Nothing is written outside `%APPDATA%\AliveForever`.
+
+### Option 3: From source
 
 ```bash
-# Clone the repository
 git clone https://github.com/abutsik4/Alive_Forever.git
 cd Alive_Forever
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the app
 python keep_alive.py
 ```
 
-### Option 3: Run Without Console Window (Silent Mode)
+Or double-click `run.bat` (with console) or `run_silent.bat` (hidden).
 
-Double-click **`run_silent.bat`** to launch completely hidden - no console window, just the tray icon!
+### Building it yourself
 
-> **How it works:** Uses `pythonw.exe` instead of `python.exe` to run without a console.
+```powershell
+.\build.ps1
+```
+
+Produces `dist/AliveForever` (portable) and, if NSIS is installed,
+`dist/AliveForever-Setup.exe`.
+
+## What this does, and what it does not
+
+Being straight about this is more useful than a long feature list:
+
+**It does:**
+- Ask Windows not to sleep or blank the display, via the same power API that
+  Caffeine and PowerToys Awake use. This involves no fake input at all.
+- Send an F15 keypress (a key no keyboard has and no app reacts to) and/or an
+  invisible mouse event, which is what keeps Teams from marking you Away.
+- Only do that while you are actually away from the machine, so it never
+  fights you for the cursor.
+
+**It does not:**
+- Hide anything from your employer. Teams reports presence, not keystrokes,
+  but device management software can see what runs on your PC. This is an
+  ordinary tray utility, not a stealth tool.
+- Override a lock screen enforced by group policy. On a managed machine your
+  IT policy still wins, and no keep-awake tool can change that.
+- Send any data anywhere. There is no network code in this project.
 
 ## User Guide
 
@@ -104,7 +146,11 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 
 **Right-click** the tray icon to access:
 
+- **Status line** - Current state at a glance, no need to open Settings.
 - **Pause / Resume** - Toggle the keep-alive function.
+- **Stay active for** - 30 min / 1 h / 2 h / 4 h. Overrides the schedule.
+- **Pause for** - Same durations, in the other direction.
+- **Clear timer** - Drop a running override and go back to the schedule.
 - **Settings** - Open the configuration panel.
 - **Quit** - Exit the application.
 
@@ -192,7 +238,7 @@ To build a standalone Windows package that does not require Python for end users
 This does the following:
 
 - Regenerates `icon.png` and `icon.ico`
-- Installs PyInstaller if needed
+- Installs PyInstaller from `requirements-build.txt`
 - Builds a packaged app into `dist/AliveForever/`
 - Builds `dist/AliveForever-Setup.exe` if `makensis` is installed
 
@@ -200,15 +246,19 @@ If NSIS is not installed, the installer script is still available at `installer/
 
 ## Startup Options
 
-**Option A: Via Settings Panel**
-1. Right-click tray icon → ⚙ Settings
-2. Enable "Start with Windows"
-3. Click "💾 Save Settings"
+The app asks once, on first launch, whether it should start with Windows.
+If you said no and changed your mind:
 
-**Option B: Manual**
-1. Press `Win + R`
-2. Type `shell:startup` and press Enter
-3. Create a shortcut to `run.bat` in this folder
+1. Right-click tray icon -> Settings
+2. Enable "Start with Windows"
+3. Click "Save Settings"
+
+**How it registers.** A Scheduled Task is created first, because Run-key
+entries can be silently disabled from Task Manager's Startup tab. If task
+creation is blocked by policy, it falls back to the Run key automatically.
+Either way the entry is validated on every launch - if you move the folder or
+reinstall Python, it repairs itself instead of quietly failing, and the Status
+card shows whether startup is **registered**, **broken**, or **off**.
 
 ## Help Topics
 
@@ -219,7 +269,15 @@ If NSIS is not installed, the installer script is still available at `installer/
 > Yes! The activity simulation works at the Windows level, regardless of Teams' window state.
 
 **Q: Will it prevent my PC from sleeping?**
-> No, it only simulates keyboard/mouse activity. Your PC's power management settings are unaffected.
+> Yes. "Prevent Sleep" is on by default and uses the Windows power API
+> (`SetThreadExecutionState`) rather than fake input. "Keep Screen On" is a
+> separate option, off by default. Note that a lock screen enforced by company
+> policy still wins - no keep-awake tool can override that.
+
+**Q: Does it move my mouse while I'm using the PC?**
+> No. "Only Act While You Are Away" is on by default, so nothing is injected
+> until you have been idle for 45 seconds. And "Invisible Mouse Jiggle" sends a
+> zero-pixel movement, so even then the pointer never actually moves.
 
 **Q: How do I completely close it?**
 > Right-click the tray icon → ✕ Quit, or close the console window if visible.

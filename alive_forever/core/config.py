@@ -41,7 +41,7 @@ PRESET_CONFIGS = {
             windows=[TimeWindow(start="18:00", end="23:30", days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"])],
         ),
     },
-    "Stealth": {
+    "Focus": {
         "interval": 90,
         "activity_type": "Both",
         "schedule": ScheduleConfig(
@@ -54,6 +54,10 @@ PRESET_CONFIGS = {
     },
 }
 
+
+# "Stealth" was renamed: the tool does not hide anything, and naming a preset
+# for concealment misrepresented what it does.
+RENAMED_PRESETS = {"Stealth": "Focus"}
 
 VALID_OVERRIDE_STATES = ("active", "paused")
 
@@ -173,6 +177,7 @@ def config_from_raw(raw_config):
         activity_type = VALID_ACTIVITY_TYPES[0]
 
     profile_name = raw_config.get("profile_name", "Custom")
+    profile_name = RENAMED_PRESETS.get(profile_name, profile_name)
     if profile_name not in PRESET_CONFIGS:
         profile_name = "Custom"
 
