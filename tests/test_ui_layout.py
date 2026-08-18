@@ -5,23 +5,30 @@ from alive_forever.ui.settings import ModernStyle, SettingsWindow
 
 class SettingsWindowLayoutTests(unittest.TestCase):
     def test_geometry_uses_full_size_on_large_screens(self):
-        self.assertEqual((620, 860, 650, 110), SettingsWindow.calculate_window_geometry(1920, 1080))
+        self.assertEqual((640, 580, 640, 250), SettingsWindow.calculate_window_geometry(1920, 1080))
 
-    def test_geometry_clamps_height_on_scaled_laptop_screen(self):
+    def test_geometry_fits_a_laptop_screen(self):
         width, height, x_pos, y_pos = SettingsWindow.calculate_window_geometry(1366, 768)
 
-        self.assertEqual(620, width)
-        self.assertEqual(688, height)
-        self.assertEqual(373, x_pos)
-        self.assertEqual(40, y_pos)
+        self.assertEqual(640, width)
+        self.assertEqual(580, height)
+        self.assertEqual(363, x_pos)
+        self.assertEqual(94, y_pos)
 
     def test_geometry_never_exceeds_small_screen_height(self):
         width, height, x_pos, y_pos = SettingsWindow.calculate_window_geometry(1024, 600)
 
-        self.assertEqual(620, width)
+        self.assertEqual(640, width)
         self.assertEqual(520, height)
-        self.assertEqual(202, x_pos)
+        self.assertLessEqual(height, 600)
         self.assertEqual(40, y_pos)
+
+    def test_tabs_removed_the_need_to_scroll(self):
+        # The window shrank when the scrolling canvas was replaced by tabs;
+        # if it ever grows past a 768px laptop again, the scrollbar is back.
+        _, height, _, _ = SettingsWindow.calculate_window_geometry(1366, 768)
+
+        self.assertLessEqual(height, 768 - SettingsWindow.WINDOW_MARGIN)
 
 
 class ScaledGeometryTests(unittest.TestCase):
@@ -31,15 +38,15 @@ class ScaledGeometryTests(unittest.TestCase):
         # A 1920x1080 logical display at 150% reports 2880x1620.
         width, height, _, _ = SettingsWindow.calculate_window_geometry(2880, 1620, scale=1.5)
 
-        self.assertEqual(930, width)
-        self.assertEqual(1290, height)
+        self.assertEqual(960, width)
+        self.assertEqual(870, height)
 
     def test_scaled_window_still_fits_a_short_screen(self):
-        width, height, _, y_pos = SettingsWindow.calculate_window_geometry(2048, 1152, scale=1.5)
+        width, height, _, y_pos = SettingsWindow.calculate_window_geometry(1536, 864, scale=1.5)
 
-        self.assertEqual(930, width)
-        self.assertEqual(1072, height)
-        self.assertLessEqual(height, 1152)
+        self.assertEqual(960, width)
+        self.assertEqual(784, height)
+        self.assertLessEqual(height, 864)
         self.assertGreaterEqual(y_pos, 0)
 
     def test_scale_of_one_matches_the_unscaled_result(self):
@@ -81,6 +88,11 @@ class ModernStyleScalingTests(unittest.TestCase):
         # here as well would apply the display scale twice.
         self.assertEqual(10, ModernStyle.FONT_BODY[1])
         self.assertEqual(18, ModernStyle.FONT_TITLE[1])
+
+
+class TabTests(unittest.TestCase):
+    def test_declared_tabs(self):
+        self.assertEqual(("Status", "Activity", "Schedule", "Startup", "About"), SettingsWindow.TABS)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,11 @@
-"""Tk settings window for Alive Forever."""
+"""Tk settings window for Alive Forever.
+
+The window is organised as Windows 95 style tabs rather than one long scrolling
+column: six general options never justified a scrollbar, and the canvas plus
+global mousewheel binding it required were a large amount of plumbing for a
+worse result. The schedule is edited as a 7x24 grid, which also removes the
+"typed a window but forgot to press Add" failure the old editor allowed.
+"""
 
 import tkinter as tk
 from tkinter import messagebox
@@ -10,8 +17,17 @@ from alive_forever.core.config import (
     clamp_idle_threshold,
     clamp_interval,
 )
-from alive_forever.core.scheduler import DAY_LABELS, DAY_ORDER, ScheduleConfig, TimeWindow, describe_schedule, parse_time_string
-from alive_forever.system.windows import ICON_FILE
+from alive_forever.core.scheduler import (
+    DAY_LABELS,
+    DAY_ORDER,
+    ScheduleConfig,
+    TimeWindow,
+    describe_schedule,
+    grid_to_windows,
+    schedule_uses_minute_precision,
+    windows_to_grid,
+)
+from alive_forever.system.windows import APP_NAME, ICON_FILE, LOG_DIR
 
 
 class ModernStyle:
@@ -81,41 +97,162 @@ class ModernStyle:
         return family
 
 
+class ScheduleGrid:
+    """A 7x24 click-and-drag grid of active hours.
+
+    Drawn on a canvas rather than as 168 widgets: painting a drag across a
+    hundred cells has to stay cheap, and a canvas gives pixel control over the
+    Win95 cell bevels.
+    """
+
+    LABEL_WIDTH = 32
+    HEADER_HEIGHT = 16
+    CELL_WIDTH = 20
+    CELL_HEIGHT = 17
+
+    def __init__(self, parent, cells, on_change):
+        self.on_change = on_change
+        self.cells = set(cells)
+        self._paint_value = True
+
+        scale = ModernStyle.SCALE
+        self.label_width = round(self.LABEL_WIDTH * scale)
+        self.header_height = round(self.HEADER_HEIGHT * scale)
+        self.cell_width = round(self.CELL_WIDTH * scale)
+        self.cell_height = round(self.CELL_HEIGHT * scale)
+
+        width = self.label_width + self.cell_width * 24
+        height = self.header_height + self.cell_height * 7
+
+        self.canvas = tk.Canvas(
+            parent,
+            width=width,
+            height=height,
+            bg=ModernStyle.PANEL_BG,
+            highlightthickness=0,
+            bd=2,
+            relief=tk.SUNKEN,
+        )
+        self.canvas.bind("<Button-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+
+        self._rects = {}
+        self._draw()
+
+    def pack(self, **kwargs):
+        self.canvas.pack(**kwargs)
+
+    def _draw(self):
+        for hour in range(0, 24, 3):
+            self.canvas.create_text(
+                self.label_width + hour * self.cell_width + 1,
+                self.header_height // 2,
+                text=str(hour),
+                anchor="w",
+                font=ModernStyle.FONT_SMALL,
+                fill=ModernStyle.TEXT_DIM,
+            )
+
+        for day_index, day_code in enumerate(DAY_ORDER):
+            top = self.header_height + day_index * self.cell_height
+            self.canvas.create_text(
+                2,
+                top + self.cell_height // 2,
+                text=DAY_LABELS[day_code],
+                anchor="w",
+                font=ModernStyle.FONT_SMALL,
+                fill=ModernStyle.TEXT,
+            )
+
+            for hour in range(24):
+                left = self.label_width + hour * self.cell_width
+                rect = self.canvas.create_rectangle(
+                    left,
+                    top,
+                    left + self.cell_width,
+                    top + self.cell_height,
+                    outline=ModernStyle.BORDER_SHADOW,
+                    width=1,
+                )
+                self._rects[(day_index, hour)] = rect
+
+        self.refresh()
+
+    def refresh(self):
+        for key, rect in self._rects.items():
+            active = key in self.cells
+            self.canvas.itemconfigure(
+                rect,
+                fill=ModernStyle.SELECT_BG if active else ModernStyle.FIELD_BG,
+            )
+
+    def _cell_at(self, x, y):
+        if x < self.label_width or y < self.header_height:
+            return None
+        hour = int((x - self.label_width) // self.cell_width)
+        day_index = int((y - self.header_height) // self.cell_height)
+        if 0 <= hour < 24 and 0 <= day_index < 7:
+            return (day_index, hour)
+        return None
+
+    def _on_press(self, event):
+        cell = self._cell_at(event.x, event.y)
+        if cell is None:
+            return
+        # Dragging continues whatever the first cell did, so a drag either
+        # paints or erases rather than flip-flopping under the cursor.
+        self._paint_value = cell not in self.cells
+        self._apply(cell)
+
+    def _on_drag(self, event):
+        cell = self._cell_at(event.x, event.y)
+        if cell is not None:
+            self._apply(cell)
+
+    def _apply(self, cell):
+        already = cell in self.cells
+        if self._paint_value == already:
+            return
+        if self._paint_value:
+            self.cells.add(cell)
+        else:
+            self.cells.discard(cell)
+        self.canvas.itemconfigure(
+            self._rects[cell],
+            fill=ModernStyle.SELECT_BG if self._paint_value else ModernStyle.FIELD_BG,
+        )
+        self.on_change()
+
+    def set_cells(self, cells):
+        self.cells = set(cells)
+        self.refresh()
+
+
 class SettingsWindow:
-    WINDOW_WIDTH = 620
-    WINDOW_HEIGHT = 860
-    MIN_WINDOW_HEIGHT = 520
+    WINDOW_WIDTH = 640
+    WINDOW_HEIGHT = 580
+    MIN_WINDOW_HEIGHT = 460
     WINDOW_MARGIN = 80
 
-    # Class-level default so the editor-commit logic is safe to reason about
-    # even before the widgets that drive the flag exist.
-    _editor_dirty = False
+    TABS = ("Status", "Activity", "Schedule", "Startup", "About")
+
+    # Class-level default so the save logic is safe to reason about even
+    # before the widgets that drive the flag exist.
+    _grid_dirty = False
 
     def __init__(self, app):
         self.app = app
         self.window = None
         self.is_open = False
         self._icon_photo = None
-        self.window_day_vars = {}
         self.draft_windows = []
-        self._content_canvas = None
-        self._content_frame = None
-        self._content_scrollbar = None
-        self._editor_dirty = False
-
-    def _mark_editor_dirty(self, *_args):
-        self._editor_dirty = True
-
-    def _mark_editor_clean(self):
-        self._editor_dirty = False
-
-    def _track_editor_vars(self):
-        """Watch the window editor so we know whether it holds uncommitted input."""
-        self.window_start_var.trace_add("write", self._mark_editor_dirty)
-        self.window_end_var.trace_add("write", self._mark_editor_dirty)
-        for day_var in self.window_day_vars.values():
-            day_var.trace_add("write", self._mark_editor_dirty)
-        self._mark_editor_clean()
+        self.grid_cells = set()
+        self.grid = None
+        self._grid_dirty = False
+        self._tab_frames = {}
+        self._tab_buttons = {}
+        self._active_tab = self.TABS[0]
+        self._status_message = ""
 
     @classmethod
     def calculate_window_geometry(cls, screen_width, screen_height, scale=1.0):
@@ -134,22 +271,16 @@ class SettingsWindow:
         return width, height, x_pos, y_pos
 
     def build_schedule_windows_for_save(self):
-        """Fold the editor fields into the window list so typed edits are never lost."""
-        windows = [TimeWindow(**window.to_dict()) for window in self.draft_windows]
+        """Windows to persist.
 
-        if not hasattr(self, "window_start_var") or not hasattr(self, "window_end_var") or not hasattr(self, "windows_listbox"):
-            return windows
+        The grid has hour resolution, so an untouched grid must not overwrite a
+        schedule that was configured with minute precision.
+        """
+        if self._grid_dirty:
+            return grid_to_windows(self.grid_cells)
+        return [TimeWindow(**window.to_dict()) for window in self.draft_windows]
 
-        selection = self.windows_listbox.curselection()
-        if selection:
-            windows[selection[0]] = self._window_from_editor()
-        elif self._editor_dirty:
-            # The user typed a window but never pressed Add; committing it is far
-            # less surprising than silently throwing the input away.
-            candidate = self._window_from_editor()
-            if candidate.to_dict() not in [window.to_dict() for window in windows]:
-                windows.append(candidate)
-        return windows
+    # ------------------------------------------------------------------ setup
 
     def show(self):
         if self.window and self.window.winfo_exists():
@@ -159,10 +290,12 @@ class SettingsWindow:
             return
 
         self.draft_windows = [TimeWindow(**window.to_dict()) for window in self.app.config.schedule.windows]
+        self.grid_cells = windows_to_grid(self.draft_windows)
+        self._grid_dirty = False
 
         parent = self.app.root if self.app.root else None
         self.window = tk.Toplevel(parent) if parent else tk.Tk()
-        self.window.title("Alive Forever - Settings")
+        self.window.title("{0} - Settings".format(APP_NAME))
         self.window.configure(bg=ModernStyle.WINDOW_BG)
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         self.is_open = True
@@ -186,88 +319,124 @@ class SettingsWindow:
                 self.app.logger.debug("Could not set Tk icon", exc_info=True)
 
         self._create_ui()
-        self._populate_windows_list()
+        self._select_tab(self._active_tab)
         self._refresh_runtime_display()
 
+        self.window.bind("<Return>", lambda event: self._save_settings())
+        self.window.bind("<Escape>", lambda event: self._on_close())
+        self.window.focus_force()
+
     def _create_ui(self):
-        shell = tk.Frame(self.window, bg=ModernStyle.WINDOW_BG, bd=2, relief=tk.RAISED)
-        shell.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        shell = tk.Frame(self.window, bg=ModernStyle.WINDOW_BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        title_bar = tk.Frame(shell, bg=ModernStyle.TITLE_BG, height=28)
-        title_bar.pack(fill=tk.X, padx=2, pady=(2, 0))
-        title_bar.pack_propagate(False)
+        self._create_header(shell)
 
-        icon_badge = tk.Label(
-            title_bar,
-            text="A",
-            font=ModernStyle.FONT_BODY_BOLD,
-            fg=ModernStyle.TITLE_TEXT,
-            bg=ModernStyle.TITLE_BG,
-            padx=6,
-        )
-        icon_badge.pack(side=tk.LEFT)
+        tab_bar = tk.Frame(shell, bg=ModernStyle.WINDOW_BG)
+        tab_bar.pack(fill=tk.X, pady=(10, 0))
+        for name in self.TABS:
+            button = tk.Label(
+                tab_bar,
+                text=name,
+                font=ModernStyle.FONT_BODY,
+                fg=ModernStyle.TEXT,
+                bg=ModernStyle.PANEL_BG,
+                bd=2,
+                relief=tk.RAISED,
+                padx=12,
+                pady=4,
+                cursor="hand2",
+            )
+            button.pack(side=tk.LEFT, padx=(0, 2))
+            button.bind("<Button-1>", lambda event, tab=name: self._select_tab(tab))
+            self._tab_buttons[name] = button
+
+        body = tk.Frame(shell, bg=ModernStyle.PANEL_BG, bd=2, relief=tk.RAISED)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        for name in self.TABS:
+            frame = tk.Frame(body, bg=ModernStyle.PANEL_BG)
+            self._tab_frames[name] = frame
+
+        self._build_status_tab(self._tab_frames["Status"])
+        self._build_activity_tab(self._tab_frames["Activity"])
+        self._build_schedule_tab(self._tab_frames["Schedule"])
+        self._build_startup_tab(self._tab_frames["Startup"])
+        self._build_about_tab(self._tab_frames["About"])
+
+        self._create_footer(shell)
+
+    def _create_header(self, parent):
+        header = tk.Frame(parent, bg=ModernStyle.TITLE_BG, bd=2, relief=tk.RAISED)
+        header.pack(fill=tk.X)
+
         tk.Label(
-            title_bar,
-            text="Alive Forever Control Panel",
+            header,
+            text=APP_NAME,
             font=ModernStyle.FONT_BODY_BOLD,
             fg=ModernStyle.TITLE_TEXT,
             bg=ModernStyle.TITLE_BG,
+            padx=8,
+            pady=4,
         ).pack(side=tk.LEFT)
 
-        client_area = tk.Frame(shell, bg=ModernStyle.WINDOW_BG)
-        client_area.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        self._content_canvas = tk.Canvas(
-            client_area,
-            bg=ModernStyle.WINDOW_BG,
-            highlightthickness=0,
-            bd=0,
-        )
-        self._content_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._content_scrollbar = tk.Scrollbar(
-            client_area,
-            orient=tk.VERTICAL,
-            command=self._content_canvas.yview,
-            bg=ModernStyle.PANEL_BG,
-            activebackground=ModernStyle.PANEL_INNER,
-            troughcolor=ModernStyle.WINDOW_BG,
-            relief=tk.RAISED,
-            bd=2,
-        )
-        self._content_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._content_canvas.configure(yscrollcommand=self._content_scrollbar.set)
-
-        main_frame = tk.Frame(self._content_canvas, bg=ModernStyle.WINDOW_BG)
-        self._content_frame = main_frame
-        canvas_window = self._content_canvas.create_window((0, 0), window=main_frame, anchor="nw")
-        main_frame.bind("<Configure>", lambda event: self._on_content_configure())
-        self._content_canvas.bind("<Configure>", lambda event: self._on_canvas_configure(canvas_window, event.width))
-        self._content_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-        header = tk.Frame(main_frame, bg=ModernStyle.WINDOW_BG)
-        header.pack(fill=tk.X, pady=(2, 14))
-
-        tk.Label(
+        self.header_status_label = tk.Label(
             header,
-            text="Alive Forever",
-            font=ModernStyle.FONT_TITLE,
-            fg=ModernStyle.TEXT,
-            bg=ModernStyle.WINDOW_BG,
-        ).pack(anchor="w")
-        tk.Label(
-            header,
-            text="Classic desktop control for tray-based activity keeping",
-            font=ModernStyle.FONT_SUBTITLE,
+            text="",
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TITLE_TEXT,
+            bg=ModernStyle.TITLE_BG,
+            padx=8,
+        )
+        self.header_status_label.pack(side=tk.RIGHT)
+
+    def _create_footer(self, parent):
+        footer = tk.Frame(parent, bg=ModernStyle.WINDOW_BG)
+        footer.pack(fill=tk.X, pady=(8, 0))
+
+        buttons = tk.Frame(footer, bg=ModernStyle.WINDOW_BG)
+        buttons.pack(side=tk.RIGHT)
+        self._create_button(buttons, "Close", self._on_close).pack(side=tk.RIGHT, padx=(6, 0))
+        self._create_button(buttons, "Save", self._save_settings, primary=True).pack(side=tk.RIGHT)
+
+        # A status bar rather than a modal box on every save: less interrupting
+        # and considerably more period-correct.
+        self.status_bar = tk.Label(
+            footer,
+            text="",
+            font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
-            bg=ModernStyle.WINDOW_BG,
-        ).pack(anchor="w")
+            bg=ModernStyle.PANEL_BG,
+            bd=2,
+            relief=tk.SUNKEN,
+            anchor="w",
+            padx=6,
+            pady=2,
+        )
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        status_card = self._create_card(main_frame, "Status")
-        status_row = tk.Frame(status_card, bg=ModernStyle.PANEL_BG)
-        status_row.pack(fill=tk.X, pady=(0, 8))
+    def _select_tab(self, name):
+        self._active_tab = name
+        for tab_name, button in self._tab_buttons.items():
+            selected = tab_name == name
+            button.config(
+                relief=tk.SUNKEN if selected else tk.RAISED,
+                bg=ModernStyle.PANEL_INNER if selected else ModernStyle.PANEL_BG,
+                font=ModernStyle.FONT_BODY_BOLD if selected else ModernStyle.FONT_BODY,
+            )
+        for tab_name, frame in self._tab_frames.items():
+            if tab_name == name:
+                frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+            else:
+                frame.pack_forget()
 
-        self.status_indicator = tk.Label(status_row, text=chr(254), font=ModernStyle.FONT_BODY_BOLD, bg=ModernStyle.PANEL_BG)
+    # ------------------------------------------------------------------- tabs
+
+    def _build_status_tab(self, parent):
+        status_row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        status_row.pack(fill=tk.X)
+
+        self.status_indicator = tk.Label(status_row, text="■", font=ModernStyle.FONT_BODY_BOLD, bg=ModernStyle.PANEL_BG)
         self.status_indicator.pack(side=tk.LEFT)
 
         self.status_label = tk.Label(
@@ -283,253 +452,278 @@ class SettingsWindow:
         self.toggle_btn.pack(side=tk.RIGHT)
 
         self.status_detail_label = tk.Label(
-            status_card,
+            parent,
             text="",
             font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
             bg=ModernStyle.PANEL_BG,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=520,
+            wraplength=540,
         )
-        self.status_detail_label.pack(fill=tk.X)
+        self.status_detail_label.pack(fill=tk.X, pady=(8, 0))
 
-        stats_row = tk.Frame(status_card, bg=ModernStyle.PANEL_BG)
-        stats_row.pack(fill=tk.X, pady=(10, 0))
+        self._separator(parent)
 
-        self.session_label = tk.Label(stats_row, text="Session: 00:00:00", font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
-        self.session_label.pack(side=tk.LEFT)
-        self.activity_label = tk.Label(stats_row, text="Session activities: 0", font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
-        self.activity_label.pack(side=tk.RIGHT)
+        stats = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        stats.pack(fill=tk.X)
 
-        totals_row = tk.Frame(status_card, bg=ModernStyle.PANEL_BG)
-        totals_row.pack(fill=tk.X, pady=(6, 0))
+        self.session_label = self._stat_label(stats, "Session: 00:00:00", tk.LEFT)
+        self.activity_label = self._stat_label(stats, "Session activities: 0", tk.RIGHT)
 
-        self.total_activity_label = tk.Label(totals_row, text="Lifetime activities: 0", font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
-        self.total_activity_label.pack(side=tk.LEFT)
-        self.last_activity_label = tk.Label(totals_row, text="Last activity: --", font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
-        self.last_activity_label.pack(side=tk.RIGHT)
+        totals = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        totals.pack(fill=tk.X, pady=(6, 0))
+
+        self.total_activity_label = self._stat_label(totals, "Lifetime activities: 0", tk.LEFT)
+        self.last_activity_label = self._stat_label(totals, "Last activity: --", tk.RIGHT)
+
+        self._separator(parent)
 
         self.startup_status_label = tk.Label(
-            status_card,
+            parent,
             text="",
             font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
             bg=ModernStyle.PANEL_BG,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=520,
+            wraplength=540,
         )
-        self.startup_status_label.pack(fill=tk.X, pady=(6, 0))
+        self.startup_status_label.pack(fill=tk.X)
 
-        general_card = self._create_card(main_frame, "General")
-
+    def _build_activity_tab(self, parent):
         self.preset_var = tk.StringVar(value=self.app.config.profile_name)
-        self._create_option_row(general_card, "Preset", self.preset_var, list(PRESET_CONFIGS.keys()), self._apply_preset)
+        self._create_option_row(parent, "Preset", self.preset_var, list(PRESET_CONFIGS.keys()), self._apply_preset)
 
         self.interval_var = tk.StringVar(value=str(self.app.config.interval))
-        self._create_entry_row(general_card, "Activity Interval", self.interval_var, "seconds")
+        self._create_entry_row(parent, "Activity Interval", self.interval_var, "seconds")
 
         self.activity_type_var = tk.StringVar(value=self.app.config.activity_type)
-        self._create_option_row(general_card, "Activity Type", self.activity_type_var, VALID_ACTIVITY_TYPES)
+        self._create_option_row(parent, "Activity Type", self.activity_type_var, VALID_ACTIVITY_TYPES)
 
-        self.startup_var = tk.BooleanVar(value=self.app.is_startup_enabled())
-        self._create_toggle_row(general_card, "Start with Windows", self.startup_var)
+        self.zen_jiggle_var = tk.BooleanVar(value=self.app.config.zen_jiggle)
+        self._create_toggle_row(parent, "Invisible Mouse Jiggle", self.zen_jiggle_var)
 
-        self.minimized_var = tk.BooleanVar(value=self.app.config.start_minimized)
-        self._create_toggle_row(general_card, "Start Minimized", self.minimized_var)
-
-        self.notifications_var = tk.BooleanVar(value=self.app.config.notifications_enabled)
-        self._create_toggle_row(general_card, "Notifications", self.notifications_var)
-
-        awake_card = self._create_card(main_frame, "Keep Awake")
+        self._separator(parent)
 
         tk.Label(
-            awake_card,
+            parent,
             text=(
-                "These use the Windows power API directly, so they work without "
-                "faking any input. On a managed PC the lock screen may still be "
-                "enforced by company policy."
+                "Keep Awake uses the Windows power API directly, so it needs no "
+                "simulated input. On a managed PC a lock screen enforced by "
+                "company policy still applies."
             ),
             font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
             bg=ModernStyle.PANEL_BG,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=520,
+            wraplength=540,
         ).pack(fill=tk.X, pady=(0, 4))
 
         self.prevent_sleep_var = tk.BooleanVar(value=self.app.config.prevent_sleep)
-        self._create_toggle_row(awake_card, "Prevent Sleep", self.prevent_sleep_var)
+        self._create_toggle_row(parent, "Prevent Sleep", self.prevent_sleep_var)
 
         self.keep_display_var = tk.BooleanVar(value=self.app.config.keep_display_on)
-        self._create_toggle_row(awake_card, "Keep Screen On", self.keep_display_var)
+        self._create_toggle_row(parent, "Keep Screen On", self.keep_display_var)
 
         self.idle_aware_var = tk.BooleanVar(value=self.app.config.idle_aware)
-        self._create_toggle_row(awake_card, "Only Act While You Are Away", self.idle_aware_var)
+        self._create_toggle_row(parent, "Only Act While You Are Away", self.idle_aware_var)
 
         self.idle_threshold_var = tk.StringVar(value=str(self.app.config.idle_threshold))
-        self._create_entry_row(awake_card, "Consider Away After", self.idle_threshold_var, "seconds")
+        self._create_entry_row(parent, "Consider Away After", self.idle_threshold_var, "seconds")
 
-        self.zen_jiggle_var = tk.BooleanVar(value=self.app.config.zen_jiggle)
-        self._create_toggle_row(awake_card, "Invisible Mouse Jiggle", self.zen_jiggle_var)
+    def _build_startup_tab(self, parent):
+        self.startup_var = tk.BooleanVar(value=self.app.is_startup_enabled())
+        self._create_toggle_row(parent, "Start with Windows", self.startup_var)
 
-        schedule_card = self._create_card(main_frame, "Schedule")
+        self.minimized_var = tk.BooleanVar(value=self.app.config.start_minimized)
+        self._create_toggle_row(parent, "Start Minimized", self.minimized_var)
 
-        self.schedule_enabled_var = tk.BooleanVar(value=self.app.config.schedule.enabled)
-        self._create_toggle_row(schedule_card, "Enable Schedule", self.schedule_enabled_var)
+        self.notifications_var = tk.BooleanVar(value=self.app.config.notifications_enabled)
+        self._create_toggle_row(parent, "Notifications", self.notifications_var)
 
-        list_row = tk.Frame(schedule_card, bg=ModernStyle.PANEL_BG)
-        list_row.pack(fill=tk.X, pady=(8, 0))
+        self._separator(parent)
 
-        self.windows_listbox = tk.Listbox(
-            list_row,
-            height=6,
-            bg=ModernStyle.FIELD_BG,
-            fg=ModernStyle.TEXT,
-            selectbackground=ModernStyle.SELECT_BG,
-            selectforeground=ModernStyle.SELECT_TEXT,
-            relief=tk.SUNKEN,
-            bd=2,
-            activestyle="none",
-            highlightthickness=0,
-        )
-        self.windows_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.windows_listbox.bind("<<ListboxSelect>>", self._load_selected_window)
-
-        list_buttons = tk.Frame(list_row, bg=ModernStyle.PANEL_BG)
-        list_buttons.pack(side=tk.LEFT, padx=(10, 0), fill=tk.Y)
-
-        self._create_button(list_buttons, "Add Window", self._add_window).pack(fill=tk.X, pady=(0, 6))
-        self._create_button(list_buttons, "Update Selected", self._update_window).pack(fill=tk.X, pady=(0, 6))
-        self._create_button(list_buttons, "Remove Selected", self._remove_window).pack(fill=tk.X)
-
-        editor_card = tk.Frame(schedule_card, bg=ModernStyle.PANEL_BG, bd=2, relief=tk.GROOVE)
-        editor_card.pack(fill=tk.X, pady=(12, 0))
-
-        self.window_start_var = tk.StringVar(value="09:00")
-        self._create_entry_row(editor_card, "Window Start", self.window_start_var, "HH:MM")
-
-        self.window_end_var = tk.StringVar(value="17:00")
-        self._create_entry_row(editor_card, "Window End", self.window_end_var, "HH:MM")
-
-        default_days = self.app.config.schedule.windows[0].days if self.app.config.schedule.windows else list(DAY_ORDER)
-        days_frame = tk.Frame(editor_card, bg=ModernStyle.PANEL_BG)
-        days_frame.pack(fill=tk.X, pady=8)
-        tk.Label(days_frame, text="Window Days", font=ModernStyle.FONT_BODY, fg=ModernStyle.TEXT, bg=ModernStyle.PANEL_BG).pack(anchor="w")
-
-        chips = tk.Frame(days_frame, bg=ModernStyle.PANEL_INNER, bd=2, relief=tk.SUNKEN)
-        chips.pack(fill=tk.X, pady=(8, 0))
-        for index, day_code in enumerate(DAY_ORDER):
-            day_var = tk.BooleanVar(value=day_code in default_days)
-            self.window_day_vars[day_code] = day_var
-            check = tk.Checkbutton(
-                chips,
-                text=DAY_LABELS[day_code],
-                variable=day_var,
-                bg=ModernStyle.PANEL_INNER,
-                fg=ModernStyle.TEXT,
-                activebackground=ModernStyle.PANEL_INNER,
-                activeforeground=ModernStyle.TEXT,
-                selectcolor=ModernStyle.PANEL_BG,
-                highlightthickness=1,
-                highlightbackground=ModernStyle.PANEL_INNER,
-                font=ModernStyle.FONT_SMALL,
-                padx=4,
-            )
-            check.grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 10), pady=(0, 6))
-
-        self._track_editor_vars()
-
-        self.schedule_preview_label = tk.Label(
-            schedule_card,
+        self.startup_detail_label = tk.Label(
+            parent,
             text="",
             font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
             bg=ModernStyle.PANEL_BG,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=520,
+            wraplength=540,
         )
-        self.schedule_preview_label.pack(fill=tk.X, pady=(10, 0))
-
-        actions = tk.Frame(main_frame, bg=ModernStyle.WINDOW_BG)
-        actions.pack(fill=tk.X, pady=(20, 0))
-        self._create_button(actions, "Save Settings", self._save_settings, primary=True).pack(fill=tk.X, ipady=4)
+        self.startup_detail_label.pack(fill=tk.X)
 
         tk.Label(
-            main_frame,
-            text="System log: %APPDATA%\\AliveForever\\logs",
+            parent,
+            text=(
+                "A Scheduled Task is registered first, because Run key entries can "
+                "be switched off from Task Manager's Startup tab. If policy blocks "
+                "that, the Run key is used instead.\n\n"
+                "The entry is checked on every launch, so moving this folder or "
+                "reinstalling Python repairs it rather than silently breaking it."
+            ),
             font=ModernStyle.FONT_SMALL,
             fg=ModernStyle.TEXT_DIM,
-            bg=ModernStyle.WINDOW_BG,
-        ).pack(pady=(15, 0))
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=540,
+        ).pack(fill=tk.X, pady=(10, 0))
 
-    def _on_content_configure(self):
-        if self._content_canvas and self._content_frame:
-            self._content_canvas.configure(scrollregion=self._content_canvas.bbox("all"))
+    def _build_schedule_tab(self, parent):
+        self.schedule_enabled_var = tk.BooleanVar(value=self.app.config.schedule.enabled)
+        self._create_toggle_row(parent, "Enable Schedule", self.schedule_enabled_var, command=self._update_schedule_preview)
 
-    def _on_canvas_configure(self, canvas_window, width):
-        if self._content_canvas:
-            self._content_canvas.itemconfigure(canvas_window, width=width)
-
-    def _on_mousewheel(self, event):
-        if not self.window or not self.window.winfo_exists() or not self._content_canvas:
-            return
-
-        widget = self.window.winfo_containing(event.x_root, event.y_root)
-        while widget is not None:
-            if widget == self.window:
-                delta = -1 * int(event.delta / 120) if event.delta else 0
-                if delta:
-                    self._content_canvas.yview_scroll(delta, "units")
-                return
-            widget = widget.master
-
-    def _create_card(self, parent, title):
-        card = tk.Frame(parent, bg=ModernStyle.PANEL_BG, bd=2, relief=tk.GROOVE)
-        card.pack(fill=tk.X, pady=(0, 12))
-
-        header = tk.Frame(card, bg=ModernStyle.PANEL_BG)
-        header.pack(fill=tk.X, padx=10, pady=(8, 4))
         tk.Label(
-            header,
-            text=title.upper(),
-            font=ModernStyle.FONT_CAPTION,
+            parent,
+            text="Click or drag to choose the hours you want to appear active.",
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 6))
+
+        grid_holder = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        grid_holder.pack(fill=tk.X)
+        self.grid = ScheduleGrid(grid_holder, self.grid_cells, self._on_grid_change)
+        self.grid.pack(anchor="w")
+
+        quick = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        quick.pack(fill=tk.X, pady=(8, 0))
+        self._create_button(quick, "Work hours", lambda: self._fill_grid("work")).pack(side=tk.LEFT, padx=(0, 6))
+        self._create_button(quick, "All day", lambda: self._fill_grid("all")).pack(side=tk.LEFT, padx=(0, 6))
+        self._create_button(quick, "Clear", lambda: self._fill_grid("none")).pack(side=tk.LEFT)
+
+        self.precision_label = tk.Label(
+            parent,
+            text="",
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.WARNING,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=540,
+        )
+        self.precision_label.pack(fill=tk.X, pady=(8, 0))
+        if schedule_uses_minute_precision(self.draft_windows):
+            self.precision_label.config(
+                text=(
+                    "This schedule uses minute precision. The grid works in whole "
+                    "hours, so editing it will round your windows."
+                )
+            )
+
+        self.schedule_preview_label = tk.Label(
+            parent,
+            text="",
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=540,
+        )
+        self.schedule_preview_label.pack(fill=tk.X, pady=(6, 0))
+
+    def _build_about_tab(self, parent):
+        tk.Label(
+            parent,
+            text=APP_NAME,
+            font=ModernStyle.FONT_TITLE,
             fg=ModernStyle.TEXT,
             bg=ModernStyle.PANEL_BG,
         ).pack(anchor="w")
 
-        separator = tk.Frame(card, bg=ModernStyle.BORDER_SHADOW, height=2, bd=0)
-        separator.pack(fill=tk.X, padx=10)
-        tk.Frame(separator, bg=ModernStyle.BORDER_HIGHLIGHT, height=1).pack(fill=tk.X)
+        tk.Label(
+            parent,
+            text="Keeps your PC awake and your Teams status green.",
+            font=ModernStyle.FONT_SUBTITLE,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+        ).pack(anchor="w", pady=(0, 10))
 
-        content = tk.Frame(card, bg=ModernStyle.PANEL_BG)
-        content.pack(fill=tk.X, padx=12, pady=10)
-        return content
+        self._separator(parent)
+
+        for line in (
+            "What it does:",
+            "  - Asks Windows not to sleep, through the supported power API.",
+            "  - Sends an F15 keypress, which no application reacts to, so Teams",
+            "    sees activity and stops marking you Away.",
+            "  - Only acts once you have genuinely been idle.",
+            "",
+            "What it does not do:",
+            "  - Hide anything from your employer. This is an ordinary tray app.",
+            "  - Override a lock screen enforced by company policy.",
+            "  - Send data anywhere. There is no network code in this project.",
+        ):
+            tk.Label(
+                parent,
+                text=line,
+                font=ModernStyle.FONT_SMALL,
+                fg=ModernStyle.TEXT if line.endswith(":") else ModernStyle.TEXT_DIM,
+                bg=ModernStyle.PANEL_BG,
+                anchor="w",
+                justify=tk.LEFT,
+            ).pack(fill=tk.X)
+
+        self._separator(parent)
+
+        tk.Label(
+            parent,
+            text="Logs: {0}".format(LOG_DIR),
+            font=ModernStyle.FONT_SMALL,
+            fg=ModernStyle.TEXT_DIM,
+            bg=ModernStyle.PANEL_BG,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=540,
+        ).pack(fill=tk.X)
+
+    # -------------------------------------------------------------- utilities
+
+    def _separator(self, parent):
+        holder = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        holder.pack(fill=tk.X, pady=10)
+        tk.Frame(holder, bg=ModernStyle.BORDER_SHADOW, height=1).pack(fill=tk.X)
+        tk.Frame(holder, bg=ModernStyle.BORDER_HIGHLIGHT, height=1).pack(fill=tk.X)
+
+    def _stat_label(self, parent, text, side):
+        label = tk.Label(parent, text=text, font=ModernStyle.FONT_SMALL, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG)
+        label.pack(side=side)
+        return label
 
     def _create_button(self, parent, text, command, primary=False):
-        bg = ModernStyle.PANEL_BG if primary else ModernStyle.PANEL_BG
-        fg = ModernStyle.TEXT
         button = tk.Button(
             parent,
             text=text,
             font=ModernStyle.FONT_BODY_BOLD if primary else ModernStyle.FONT_BODY,
-            bg=bg,
-            fg=fg,
+            bg=ModernStyle.PANEL_BG,
+            fg=ModernStyle.TEXT,
             activebackground=ModernStyle.PANEL_INNER,
             activeforeground=ModernStyle.TEXT,
             relief=tk.RAISED,
             bd=2,
             highlightbackground=ModernStyle.PANEL_BG,
+            highlightthickness=1,
+            takefocus=True,
             command=command,
         )
-        button.config(padx=12, pady=4)
+        button.config(padx=12, pady=3)
+        # Explicit press states: a Win95 button visibly sinks, and Tk's default
+        # only does so on some platforms.
+        button.bind("<ButtonPress-1>", lambda event: event.widget.config(relief=tk.SUNKEN))
+        button.bind("<ButtonRelease-1>", lambda event: event.widget.config(relief=tk.RAISED))
+        button.bind("<FocusIn>", lambda event: event.widget.config(highlightbackground=ModernStyle.TEXT))
+        button.bind("<FocusOut>", lambda event: event.widget.config(highlightbackground=ModernStyle.PANEL_BG))
         return button
 
     def _create_entry_row(self, parent, label_text, variable, suffix):
         row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
-        row.pack(fill=tk.X, pady=8)
+        row.pack(fill=tk.X, pady=6)
         tk.Label(row, text=label_text, font=ModernStyle.FONT_BODY, fg=ModernStyle.TEXT, bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
         right = tk.Frame(row, bg=ModernStyle.PANEL_BG)
         right.pack(side=tk.RIGHT)
@@ -545,12 +739,12 @@ class SettingsWindow:
             bd=2,
             justify=tk.CENTER,
         )
-        entry.pack(side=tk.LEFT, padx=(0, 5), ipady=4)
+        entry.pack(side=tk.LEFT, padx=(0, 5), ipady=2)
         tk.Label(right, text=suffix, font=ModernStyle.FONT_BODY, fg=ModernStyle.TEXT_DIM, bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
 
     def _create_option_row(self, parent, label_text, variable, options, command=None):
         row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
-        row.pack(fill=tk.X, pady=8)
+        row.pack(fill=tk.X, pady=6)
         tk.Label(row, text=label_text, font=ModernStyle.FONT_BODY, fg=ModernStyle.TEXT, bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
         container = tk.Frame(row, bg=ModernStyle.PANEL_BG, bd=2, relief=tk.RAISED)
         container.pack(side=tk.RIGHT)
@@ -575,9 +769,9 @@ class SettingsWindow:
         )
         menu.pack()
 
-    def _create_toggle_row(self, parent, label_text, variable):
+    def _create_toggle_row(self, parent, label_text, variable, command=None):
         row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
-        row.pack(fill=tk.X, pady=8)
+        row.pack(fill=tk.X, pady=6)
         tk.Label(row, text=label_text, font=ModernStyle.FONT_BODY, fg=ModernStyle.TEXT, bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
         toggle = tk.Checkbutton(
             row,
@@ -587,69 +781,34 @@ class SettingsWindow:
             fg=ModernStyle.TEXT,
             activebackground=ModernStyle.PANEL_BG,
             activeforeground=ModernStyle.TEXT,
-            selectcolor=ModernStyle.PANEL_BG,
+            selectcolor=ModernStyle.FIELD_BG,
             relief=tk.FLAT,
             highlightthickness=1,
             highlightbackground=ModernStyle.PANEL_BG,
             font=ModernStyle.FONT_BODY,
+            command=command,
         )
         toggle.pack(side=tk.RIGHT)
 
-    def _populate_windows_list(self):
-        self.windows_listbox.delete(0, tk.END)
-        for window in self.draft_windows:
-            self.windows_listbox.insert(tk.END, window.label())
+    # --------------------------------------------------------------- schedule
+
+    def _on_grid_change(self):
+        self._grid_dirty = True
+        self.grid_cells = self.grid.cells
         self._update_schedule_preview()
 
-    def _window_from_editor(self):
-        start = self.window_start_var.get().strip()
-        end = self.window_end_var.get().strip()
-        parse_time_string(start)
-        parse_time_string(end)
-        days = [day for day in DAY_ORDER if self.window_day_vars[day].get()]
-        if not days:
-            raise ValueError("Select at least one day for the window.")
-        return TimeWindow(start=start, end=end, days=days)
+    def _fill_grid(self, mode):
+        if mode == "all":
+            cells = {(day, hour) for day in range(7) for hour in range(24)}
+        elif mode == "work":
+            cells = {(day, hour) for day in range(5) for hour in range(9, 18)}
+        else:
+            cells = set()
 
-    def _load_selected_window(self, event=None):
-        selection = self.windows_listbox.curselection()
-        if not selection:
-            return
-        window = self.draft_windows[selection[0]]
-        self.window_start_var.set(window.start)
-        self.window_end_var.set(window.end)
-        for day_code in DAY_ORDER:
-            self.window_day_vars[day_code].set(day_code in window.days)
-        self._mark_editor_clean()
-
-    def _add_window(self):
-        try:
-            self.draft_windows.append(self._window_from_editor())
-            self._populate_windows_list()
-            self._mark_editor_clean()
-        except ValueError as error:
-            messagebox.showerror("Error", str(error))
-
-    def _update_window(self):
-        selection = self.windows_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Select a schedule window to update.")
-            return
-        try:
-            self.draft_windows[selection[0]] = self._window_from_editor()
-            self._populate_windows_list()
-            self.windows_listbox.selection_set(selection[0])
-            self._mark_editor_clean()
-        except ValueError as error:
-            messagebox.showerror("Error", str(error))
-
-    def _remove_window(self):
-        selection = self.windows_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Select a schedule window to remove.")
-            return
-        del self.draft_windows[selection[0]]
-        self._populate_windows_list()
+        self.grid.set_cells(cells)
+        self.grid_cells = self.grid.cells
+        self._grid_dirty = True
+        self._update_schedule_preview()
 
     def _apply_preset(self, preset_name):
         preview_config = self.app.config.clone()
@@ -658,22 +817,35 @@ class SettingsWindow:
         self.activity_type_var.set(preview_config.activity_type)
         self.schedule_enabled_var.set(preview_config.schedule.enabled)
         self.draft_windows = [TimeWindow(**window.to_dict()) for window in preview_config.schedule.windows]
-        self._populate_windows_list()
-        if self.draft_windows:
-            first_window = self.draft_windows[0]
-            self.window_start_var.set(first_window.start)
-            self.window_end_var.set(first_window.end)
-            for day_code in DAY_ORDER:
-                self.window_day_vars[day_code].set(day_code in first_window.days)
-        self._mark_editor_clean()
+        self.grid_cells = windows_to_grid(self.draft_windows)
+        if self.grid:
+            self.grid.set_cells(self.grid_cells)
+        # The preset defines the windows exactly, so the grid is authoritative
+        # only once the user edits it again.
+        self._grid_dirty = False
+        self._update_schedule_preview()
+        self._set_status("Preset '{0}' loaded. Press Save to apply.".format(preset_name))
 
     def _update_schedule_preview(self):
-        preview_schedule = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=list(self.draft_windows))
-        self.schedule_preview_label.config(text=describe_schedule(preview_schedule))
+        if not hasattr(self, "schedule_preview_label"):
+            return
+        windows = self.build_schedule_windows_for_save()
+        preview = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=windows)
+        self.schedule_preview_label.config(text=describe_schedule(preview))
+
+    # ---------------------------------------------------------------- runtime
 
     def _toggle_status(self):
         self.app.toggle_state()
         self._refresh_runtime_display()
+
+    def _set_status(self, message):
+        self._status_message = message
+        if hasattr(self, "status_bar"):
+            try:
+                self.status_bar.config(text=message)
+            except tk.TclError:
+                pass
 
     def _refresh_runtime_display(self):
         if not self.window or not self.window.winfo_exists():
@@ -685,6 +857,7 @@ class SettingsWindow:
             self.status_indicator.config(fg=color)
             self.status_label.config(text=status_name)
             self.status_detail_label.config(text=detail)
+            self.header_status_label.config(text=status_name)
             self.toggle_btn.config(text="Resume" if self.app.manual_paused else "Pause")
 
             if self.app.start_time:
@@ -719,6 +892,13 @@ class SettingsWindow:
             text="Startup: {0} - {1}".format(status.label(), status.detail),
             fg=color,
         )
+        if hasattr(self, "startup_detail_label"):
+            lines = ["Current registration: {0}".format(status.label()), status.detail]
+            if status.command:
+                lines.append(status.command)
+            self.startup_detail_label.config(text="\n".join(lines), fg=color)
+
+    # ------------------------------------------------------------------- save
 
     def _save_settings(self):
         try:
@@ -738,7 +918,7 @@ class SettingsWindow:
 
             schedule_windows = self.build_schedule_windows_for_save()
             if self.schedule_enabled_var.get() and not schedule_windows:
-                raise ValueError("Add at least one schedule window or disable scheduling.")
+                raise ValueError("Select at least one hour in the schedule grid, or turn the schedule off.")
 
             updated_config = self.app.config.clone()
             updated_config.interval = interval
@@ -760,20 +940,27 @@ class SettingsWindow:
             # registry problem below can no longer discard the user's edits.
             self.app.apply_config(updated_config)
             self.draft_windows = [TimeWindow(**window.to_dict()) for window in updated_config.schedule.windows]
-            self._populate_windows_list()
-            self._mark_editor_clean()
+            self.grid_cells = windows_to_grid(self.draft_windows)
+            if self.grid:
+                self.grid.set_cells(self.grid_cells)
+            self._grid_dirty = False
+            self.precision_label.config(text="")
         except ValueError as error:
+            self._set_status(str(error))
             messagebox.showerror("Error", str(error))
             return
         except Exception as error:
             self.app.logger.exception("Could not save settings")
+            self._set_status("Could not save settings.")
             messagebox.showerror("Error", "Could not save settings:\n{0}".format(error))
             return
 
+        saved_at = self.app.now_provider().strftime("%H:%M")
         try:
             self.app.set_startup_enabled(self.startup_var.get())
         except Exception as error:
             self.app.logger.exception("Could not update startup registration")
+            self._set_status("Settings saved, but Windows startup could not be updated.")
             messagebox.showwarning(
                 "Startup not changed",
                 "Your settings were saved, but Windows startup could not be updated:\n\n{0}".format(error),
@@ -781,12 +968,9 @@ class SettingsWindow:
             self.startup_var.set(self.app.is_startup_enabled())
             return
 
-        messagebox.showinfo("Saved", "Settings saved successfully.")
+        self._set_status("Settings saved - {0}".format(saved_at))
 
     def _on_close(self):
         self.is_open = False
-        if self._content_canvas:
-            self._content_canvas.unbind_all("<MouseWheel>")
         if self.window:
             self.window.destroy()
-            self.window = None

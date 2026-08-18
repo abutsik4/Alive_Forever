@@ -48,7 +48,8 @@
 - Built-In Presets: Start from Always On, Workday, Evening, or Focus.
 - Self-Healing Startup: Registers a logon task, checks it still works on every
   launch, and repairs it if you move the folder.
-- Retro Control Panel UI: Windows 95-inspired, and DPI-aware so it stays sharp.
+- Retro Control Panel UI: Windows 95-inspired, tabbed, and DPI-aware so it
+  stays sharp on scaled displays.
 - Live Stats: Track session and lifetime activity counts.
 - Persistent Logs: Troubleshoot silent mode from a rotating log file.
 
@@ -157,8 +158,25 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 ### Settings Panel
 
 <p align="center">
-  <em>Access via tray icon → Settings for a classic control-panel style window</em>
+  <em>Access via tray icon -> Settings for a classic control-panel style window</em>
 </p>
+
+The panel is organised as tabs, so nothing scrolls:
+
+| Tab | Contains |
+|-----|----------|
+| **Status** | Current state, session and lifetime counters, startup health |
+| **Activity** | Preset, interval, activity type, and the Keep Awake options |
+| **Schedule** | A 7x24 grid - click or drag to paint the hours you want active |
+| **Startup** | Start with Windows, start minimized, notifications |
+| **About** | What the app does and does not do, and where the logs live |
+
+`Enter` saves, `Esc` closes. Saving reports into the status bar rather than
+interrupting with a dialog.
+
+> **A note on the schedule grid:** it works in whole hours. If your existing
+> schedule uses minute precision (say 08:30-11:45) the panel says so, and it
+> only rewrites your windows if you actually edit the grid.
 
 | Setting | Description | Default |
 |---------|-------------|---------|

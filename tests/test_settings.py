@@ -1,87 +1,91 @@
-import tkinter as tk
 import unittest
 
-from alive_forever.core.scheduler import DAY_ORDER, TimeWindow
+from alive_forever.core.scheduler import DAY_ORDER, TimeWindow, windows_to_grid
 from alive_forever.ui.settings import SettingsWindow
 
 
-class _ListboxStub:
-    def __init__(self, selection):
-        self._selection = selection
+class ScheduleSaveTests(unittest.TestCase):
+    """The grid only overwrites the saved schedule once the user edits it.
 
-    def curselection(self):
-        return self._selection
+    The grid works in whole hours, so writing it back unconditionally would
+    silently round a schedule configured with minute precision.
+    """
 
-
-class SettingsWindowSaveTests(unittest.TestCase):
-    def setUp(self):
-        self.root = tk.Tcl()
-
-    def _build_window(self, selection=(0,), start="10:00", end="18:00", selected_days=None):
-        if selected_days is None:
-            selected_days = ["mon"]
-
+    def _build_window(self, windows, grid_dirty=False, cells=None):
         window = SettingsWindow.__new__(SettingsWindow)
-        window.draft_windows = [TimeWindow(start="09:00", end="17:00", days=["mon"])]
-        window.window_start_var = tk.StringVar(master=self.root, value=start)
-        window.window_end_var = tk.StringVar(master=self.root, value=end)
-        window.window_day_vars = {
-            day: tk.BooleanVar(master=self.root, value=day in selected_days) for day in DAY_ORDER
-        }
-        window.windows_listbox = _ListboxStub(selection)
+        window.draft_windows = list(windows)
+        window.grid_cells = set(cells) if cells is not None else windows_to_grid(windows)
+        window._grid_dirty = grid_dirty
         return window
 
-    def test_build_schedule_windows_for_save_updates_selected_window(self):
-        window = self._build_window(selection=(0,), start="10:00", end="18:00", selected_days=["mon", "wed"])
+    def test_untouched_grid_preserves_the_original_windows(self):
+        original = [TimeWindow(start="08:30", end="11:45", days=["mon", "tue"])]
+        window = self._build_window(original)
 
-        schedule_windows = window.build_schedule_windows_for_save()
+        saved = window.build_schedule_windows_for_save()
 
-        self.assertEqual(1, len(schedule_windows))
-        self.assertEqual("10:00", schedule_windows[0].start)
-        self.assertEqual("18:00", schedule_windows[0].end)
-        self.assertEqual(["mon", "wed"], schedule_windows[0].days)
+        self.assertEqual(1, len(saved))
+        self.assertEqual("08:30", saved[0].start)
+        self.assertEqual("11:45", saved[0].end)
+        self.assertEqual(["mon", "tue"], saved[0].days)
 
-    def test_build_schedule_windows_for_save_keeps_draft_without_selection(self):
-        window = self._build_window(selection=(), start="10:00", end="18:00", selected_days=["mon", "wed"])
+    def test_untouched_grid_returns_copies_not_the_originals(self):
+        original = [TimeWindow(start="09:00", end="17:00", days=["mon"])]
+        window = self._build_window(original)
 
-        schedule_windows = window.build_schedule_windows_for_save()
+        saved = window.build_schedule_windows_for_save()
+        saved[0].start = "10:00"
 
-        self.assertEqual(1, len(schedule_windows))
-        self.assertEqual("09:00", schedule_windows[0].start)
-        self.assertEqual("17:00", schedule_windows[0].end)
-        self.assertEqual(["mon"], schedule_windows[0].days)
+        self.assertEqual("09:00", original[0].start)
 
-    def test_untouched_editor_adds_nothing(self):
-        window = self._build_window(selection=(), start="09:00", end="17:00", selected_days=["mon"])
+    def test_edited_grid_replaces_the_windows(self):
+        original = [TimeWindow(start="09:00", end="17:00", days=["mon"])]
+        monday = DAY_ORDER.index("mon")
+        window = self._build_window(
+            original,
+            grid_dirty=True,
+            cells={(monday, hour) for hour in (13, 14, 15)},
+        )
 
-        self.assertEqual(1, len(window.build_schedule_windows_for_save()))
+        saved = window.build_schedule_windows_for_save()
 
-    def test_dirty_editor_without_selection_is_committed_instead_of_discarded(self):
-        window = self._build_window(selection=(), start="19:00", end="22:00", selected_days=["sat", "sun"])
-        window._editor_dirty = True
+        self.assertEqual(1, len(saved))
+        self.assertEqual("13:00", saved[0].start)
+        self.assertEqual("16:00", saved[0].end)
+        self.assertEqual(["mon"], saved[0].days)
 
-        schedule_windows = window.build_schedule_windows_for_save()
+    def test_clearing_the_grid_yields_no_windows(self):
+        original = [TimeWindow(start="09:00", end="17:00", days=["mon"])]
+        window = self._build_window(original, grid_dirty=True, cells=set())
 
-        self.assertEqual(2, len(schedule_windows))
-        self.assertEqual("09:00", schedule_windows[0].start)
-        self.assertEqual("19:00", schedule_windows[1].start)
-        self.assertEqual("22:00", schedule_windows[1].end)
-        self.assertEqual(["sat", "sun"], schedule_windows[1].days)
+        self.assertEqual([], window.build_schedule_windows_for_save())
 
-    def test_dirty_editor_matching_an_existing_window_is_not_duplicated(self):
-        window = self._build_window(selection=(), start="09:00", end="17:00", selected_days=["mon"])
-        window._editor_dirty = True
+    def test_edited_grid_merges_days_that_share_a_run(self):
+        window = self._build_window(
+            [],
+            grid_dirty=True,
+            cells={(day, hour) for day in range(5) for hour in range(9, 12)},
+        )
 
-        schedule_windows = window.build_schedule_windows_for_save()
+        saved = window.build_schedule_windows_for_save()
 
-        self.assertEqual(1, len(schedule_windows))
+        self.assertEqual(1, len(saved))
+        self.assertEqual(["mon", "tue", "wed", "thu", "fri"], saved[0].days)
+        self.assertEqual(("09:00", "12:00"), (saved[0].start, saved[0].end))
 
-    def test_dirty_editor_with_no_days_selected_raises(self):
-        window = self._build_window(selection=(), start="19:00", end="22:00", selected_days=[])
-        window._editor_dirty = True
+    def test_hour_aligned_schedule_is_unchanged_by_a_grid_edit_that_restores_it(self):
+        original = [TimeWindow(start="09:00", end="12:00", days=["mon"])]
+        window = self._build_window(original, grid_dirty=True)
 
-        with self.assertRaises(ValueError):
-            window.build_schedule_windows_for_save()
+        saved = window.build_schedule_windows_for_save()
+
+        self.assertEqual(("09:00", "12:00"), (saved[0].start, saved[0].end))
+        self.assertEqual(["mon"], saved[0].days)
+
+    def test_default_grid_dirty_flag_is_false(self):
+        # Guards the class-level default that keeps a partially built window
+        # from spuriously overwriting the schedule.
+        self.assertFalse(SettingsWindow._grid_dirty)
 
 
 if __name__ == "__main__":

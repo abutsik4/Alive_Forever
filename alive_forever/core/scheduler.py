@@ -197,6 +197,97 @@ def format_transition(transition):
     return "Next: {0} at {1}".format(label, transition_at.strftime("%a %H:%M"))
 
 
+def _covered_hours(start_time, end_time):
+    """Hour slots [0, 24) touched by a window that does not cross midnight."""
+    last_hour = end_time.hour - 1 if end_time.minute == 0 else end_time.hour
+    return list(range(start_time.hour, min(last_hour, 23) + 1))
+
+
+def windows_to_grid(windows):
+    """Project time windows onto a 7x24 set of (day_index, hour) cells.
+
+    The grid has hour resolution, so a window like 08:30-11:45 lights up 08
+    through 11. Callers must therefore only write the grid back when the user
+    actually edited it, or minute-level schedules would be silently rounded.
+    """
+    cells = set()
+    for window in windows:
+        start_time = parse_time_string(window.start)
+        end_time = parse_time_string(window.end)
+
+        for day in window.days:
+            day_index = DAY_ORDER.index(day)
+
+            if start_time < end_time:
+                for hour in _covered_hours(start_time, end_time):
+                    cells.add((day_index, hour))
+                continue
+
+            # Crosses midnight: fill to the end of this day, then spill into
+            # the next one.
+            for hour in range(start_time.hour, 24):
+                cells.add((day_index, hour))
+            next_day = (day_index + 1) % 7
+            last_hour = end_time.hour - 1 if end_time.minute == 0 else end_time.hour
+            for hour in range(0, min(last_hour, 23) + 1):
+                cells.add((next_day, hour))
+    return cells
+
+
+def _runs_for_day(hours):
+    """Contiguous (start, end_exclusive) hour runs from a sorted hour list."""
+    runs = []
+    for hour in sorted(hours):
+        if runs and runs[-1][1] == hour:
+            runs[-1][1] = hour + 1
+        else:
+            runs.append([hour, hour + 1])
+    return [tuple(run) for run in runs]
+
+
+def _format_hour(hour):
+    if hour >= 24:
+        # 24:00 is not expressible, and 00:00 would equal the start of a
+        # full-day run, so clamp to the last minute of the day.
+        return "23:59"
+    return "{0:02d}:00".format(hour)
+
+
+def grid_to_windows(cells):
+    """Collapse grid cells back into the smallest set of time windows.
+
+    Days sharing an identical run are merged into one window, which keeps the
+    saved schedule readable instead of producing seven near-identical entries.
+    """
+    runs_by_day = {}
+    for day_index in range(7):
+        hours = [hour for (day, hour) in cells if day == day_index]
+        if hours:
+            runs_by_day[day_index] = _runs_for_day(hours)
+
+    days_by_run = {}
+    for day_index, runs in sorted(runs_by_day.items()):
+        for run in runs:
+            days_by_run.setdefault(run, []).append(DAY_ORDER[day_index])
+
+    windows = []
+    for (start_hour, end_hour), days in sorted(days_by_run.items()):
+        start = _format_hour(start_hour)
+        end = _format_hour(end_hour)
+        if start == end:
+            continue
+        windows.append(TimeWindow(start=start, end=end, days=days))
+    return windows
+
+
+def schedule_uses_minute_precision(windows):
+    """True when rounding to the grid's hour resolution would lose detail."""
+    for window in windows:
+        if parse_time_string(window.start).minute or parse_time_string(window.end).minute:
+            return True
+    return False
+
+
 def describe_schedule(schedule, now=None):
     if not schedule.enabled:
         return "Schedule disabled. The app stays active unless you pause it manually."
