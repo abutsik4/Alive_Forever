@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 
 # SPECPATH is where this file lives, so the build no longer depends on the
@@ -14,7 +15,7 @@ if not icon_file.exists():
         "(build.ps1 does this for you)."
     )
 
-datas = [(str(project_dir / "icon.png"), ".")]
+datas = [(str(project_dir / "icon.png"), ".")] + collect_data_files("tzdata")
 hiddenimports = ["pystray._win32", "PIL._tkinter_finder"]
 
 # Pillow and pystray declare these as optional dependencies, so PyInstaller

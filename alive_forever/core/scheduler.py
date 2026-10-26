@@ -1,8 +1,10 @@
 """Scheduling primitives and evaluation helpers."""
 
 from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import List
+from zoneinfo import ZoneInfo
+from functools import lru_cache
 
 
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -78,6 +80,14 @@ class TimeWindow:
 class ScheduleConfig:
     enabled: bool = False
     windows: List[TimeWindow] = field(default_factory=list)
+    timezone: str = "local"
+
+    def __post_init__(self):
+        if self.timezone != "local":
+            try:
+                ZoneInfo(self.timezone)
+            except (KeyError, ValueError, TypeError) as error:
+                raise ValueError("Unknown schedule timezone: {0}".format(self.timezone)) from error
 
     @classmethod
     def default(cls):
@@ -124,16 +134,17 @@ class ScheduleConfig:
         if not windows:
             windows = cls.default().windows
 
-        return cls(enabled=enabled, windows=windows)
+        return cls(enabled=enabled, windows=windows, timezone=raw_schedule.get("timezone", "local"))
 
     def to_dict(self):
         return {
             "enabled": self.enabled,
+            "timezone": self.timezone,
             "windows": [window.to_dict() for window in self.windows],
         }
 
     def clone(self):
-        return ScheduleConfig(enabled=self.enabled, windows=[TimeWindow(**window.to_dict()) for window in self.windows])
+        return ScheduleConfig(enabled=self.enabled, timezone=self.timezone, windows=[TimeWindow(**window.to_dict()) for window in self.windows])
 
 
 def build_window_occurrence(window, active_date):
@@ -156,9 +167,15 @@ def iter_window_occurrences(schedule, now, day_span=14):
             yield window, build_window_occurrence(window, active_date)
 
 
+def schedule_now(schedule, now=None):
+    now = now or datetime.now().astimezone()
+    if schedule.timezone == "local":
+        return now.astimezone() if now.tzinfo else now
+    return now.astimezone(ZoneInfo(schedule.timezone))
+
+
 def is_schedule_active(schedule, now=None):
-    if now is None:
-        now = datetime.now()
+    now = schedule_now(schedule, now).replace(tzinfo=None)
 
     if not schedule.enabled:
         return True
@@ -169,9 +186,29 @@ def is_schedule_active(schedule, now=None):
     return False
 
 
+@lru_cache(maxsize=32)
+def _zoned_transition(zone, windows, minute):
+    # Walk real elapsed minutes: skipped/repeated DST hours must follow the
+    # same wall-clock membership rule as the runtime, including overlaps.
+    schedule = ScheduleConfig(enabled=True, timezone=zone, windows=[TimeWindow(a, b, list(days)) for a, b, days in windows])
+    initial = is_schedule_active(schedule, minute)
+    for offset in range(1, 14 * 24 * 60 + 1):
+        candidate = minute + timedelta(minutes=offset)
+        active = is_schedule_active(schedule, candidate)
+        if active != initial:
+            return ("active" if active else "scheduled_off", candidate.astimezone(ZoneInfo(zone)))
+    return None
+
+
 def get_next_transition(schedule, now=None):
-    if now is None:
-        now = datetime.now()
+    if not schedule.enabled:
+        return None
+    if schedule.timezone != "local":
+        instant = (now or datetime.now().astimezone()).astimezone(timezone.utc)
+        return _zoned_transition(schedule.timezone,
+            tuple((w.start, w.end, tuple(w.days)) for w in schedule.windows),
+            instant.replace(second=0, microsecond=0))
+    now = schedule_now(schedule, now).replace(tzinfo=None)
 
     if not schedule.enabled:
         return None
@@ -194,7 +231,7 @@ def format_transition(transition):
 
     next_state, transition_at = transition
     label = "Active" if next_state == "active" else "Scheduled Off"
-    return "Next: {0} at {1}".format(label, transition_at.strftime("%a %H:%M"))
+    return "Next: {0} at {1}".format(label, transition_at.strftime("%a %H:%M %Z").strip())
 
 
 def _covered_hours(start_time, end_time):
@@ -296,7 +333,7 @@ def describe_schedule(schedule, now=None):
     if not window_labels:
         return "Schedule enabled, but no windows are configured."
 
-    summary = "; ".join(window_labels[:3])
+    summary = ("Computer time" if schedule.timezone == "local" else schedule.timezone) + ": " + "; ".join(window_labels[:3])
     if len(window_labels) > 3:
         summary = "{0}; +{1} more".format(summary, len(window_labels) - 3)
 

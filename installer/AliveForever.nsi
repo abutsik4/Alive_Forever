@@ -66,7 +66,7 @@ Section "Start automatically at sign-in" SEC_STARTUP
     ${If} $0 != 0
         ; Even the app's fallback failed (locked-down machine, policy); write
         ; the Run key directly so the user still gets auto-start.
-        WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}" '"$INSTDIR\${APP_EXE}"'
+        WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}" '"$INSTDIR\${APP_EXE}" --autostart'
     ${EndIf}
 SectionEnd
 

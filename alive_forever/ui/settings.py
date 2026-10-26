@@ -8,7 +8,8 @@ worse result. The schedule is edited as a 7x24 grid, which also removes the
 """
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+from zoneinfo import available_timezones
 
 from alive_forever.core.config import (
     PRESET_CONFIGS,
@@ -575,6 +576,17 @@ class SettingsWindow:
         ).pack(fill=tk.X, pady=(10, 0))
 
     def _build_schedule_tab(self, parent):
+        row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
+        row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(row, text="Schedule timezone", bg=ModernStyle.PANEL_BG,
+                 font=ModernStyle.FONT_BODY).pack(side=tk.LEFT)
+        self.timezone_var = tk.StringVar(value=self.app.config.schedule.timezone)
+        zones = ["local", "Europe/London", "Europe/Tallinn"]
+        zones += sorted(available_timezones() - set(zones))
+        selector = ttk.Combobox(row, textvariable=self.timezone_var, values=zones,
+                                state="readonly", width=26)
+        selector.pack(side=tk.RIGHT)
+        selector.bind("<<ComboboxSelected>>", lambda event: self._update_schedule_preview())
         self.schedule_enabled_var = tk.BooleanVar(value=self.app.config.schedule.enabled)
         self._create_toggle_row(parent, "Enable Schedule", self.schedule_enabled_var, command=self._update_schedule_preview)
 
@@ -830,7 +842,8 @@ class SettingsWindow:
         if not hasattr(self, "schedule_preview_label"):
             return
         windows = self.build_schedule_windows_for_save()
-        preview = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=windows)
+        preview = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=windows,
+                                 timezone=self.timezone_var.get())
         self.schedule_preview_label.config(text=describe_schedule(preview))
 
     # ---------------------------------------------------------------- runtime
@@ -934,6 +947,7 @@ class SettingsWindow:
             updated_config.schedule = ScheduleConfig(
                 enabled=self.schedule_enabled_var.get(),
                 windows=schedule_windows,
+                timezone=self.timezone_var.get(),
             )
 
             # Apply the config first: it is the part that cannot fail, so a

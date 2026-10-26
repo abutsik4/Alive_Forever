@@ -1,6 +1,7 @@
 """Application entrypoint and tray runtime."""
 
 import argparse
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ try:
 except ImportError as import_error:  # pragma: no cover - depends on the environment
     import ctypes as _ctypes
 
+    logging.getLogger("alive_forever").exception("Application dependency import failed")
     _ctypes.windll.user32.MessageBoxW(
         None,
         "Alive Forever needs its dependencies installed.\n\n"
@@ -73,6 +75,7 @@ class KeepAliveApp:
         self.start_time = None
         self._last_status = None
         self._shutdown_complete = False
+        self.runtime_failed = threading.Event()
         self._icon_cache = {}
         self._applied_icon_state = None
         self._applied_icon_title = None
@@ -133,19 +136,25 @@ class KeepAliveApp:
                 self.logger.exception("Could not persist preset from command line")
 
     def get_startup_status(self):
-        if self._startup_status is None:
+        checked_at = getattr(self, "_startup_checked_at", 0)
+        if self._startup_status is None or time.monotonic() - checked_at >= 30:
             self._startup_status = startup_module.get_startup_status()
+            self._startup_checked_at = time.monotonic()
         return self._startup_status
 
     def is_startup_enabled(self):
         return self.get_startup_status().enabled
 
     def set_startup_enabled(self, enabled):
+        status = startup_module.get_startup_status()
+        if enabled and status.enabled:
+            self._startup_status = status
+            return status
         self._startup_status = startup_module.set_startup_enabled(enabled, self.logger)
         return self._startup_status
 
     def repair_startup(self):
-        """Re-point a registration left stale by a moved folder or new interpreter."""
+        """Upgrade this copy's legacy registration without replacing another copy."""
         self._startup_status = startup_module.repair_startup_if_stale(self.logger)
         return self._startup_status
 
@@ -554,9 +563,38 @@ class KeepAliveApp:
 
     def run(self):
         if not self.instance.acquire():
+            self.instance.release()
             show_message_box("Alive Forever is already running. Check the system tray.")
-            return 1
+            return 0
 
+        try:
+            return self._run_session()
+        finally:
+            self.shutdown()
+
+    def _run_worker(self, target):
+        try:
+            target()
+        except BaseException:
+            self.logger.exception("Fatal error in %s", target.__name__)
+            self.runtime_failed.set()
+        else:
+            if not self.shutdown_event.is_set():
+                self.logger.error("Required worker %s exited unexpectedly", target.__name__)
+                self.runtime_failed.set()
+
+    def _report_callback_exception(self, exc_type, value, traceback):
+        self.logger.error("Unhandled Tk callback exception", exc_info=(exc_type, value, traceback))
+        self.runtime_failed.set()
+
+    def _check_runtime(self):
+        if self.runtime_failed.is_set():
+            self.logger.error("Stopping failed application so the autostart supervisor can retry")
+            self.root.quit()
+        elif not self.shutdown_event.is_set():
+            self.root.after(500, self._check_runtime)
+
+    def _run_session(self):
         self.start_time = self.now_provider()
 
         # Must happen before the first Tk window exists, or Windows will
@@ -567,6 +605,7 @@ class KeepAliveApp:
         ModernStyle.apply_scaling(self.display_scaling)
 
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._report_callback_exception
         self.root.withdraw()
         try:
             self.root.tk.call("tk", "scaling", self.display_scaling * 96.0 / 72.0)
@@ -576,7 +615,9 @@ class KeepAliveApp:
 
         self.repair_startup()
 
-        self.thread = threading.Thread(target=self.activity_loop, daemon=True)
+        self.thread = threading.Thread(
+            target=self._run_worker, args=(self.activity_loop,), daemon=True, name="activity"
+        )
         self.thread.start()
 
         menu = self.build_tray_menu()
@@ -591,7 +632,9 @@ class KeepAliveApp:
         self._applied_icon_state = initial_state
         self._applied_icon_title = self.icon.title
 
-        icon_thread = threading.Thread(target=self.icon.run, daemon=True)
+        icon_thread = threading.Thread(
+            target=self._run_worker, args=(self.icon.run,), daemon=True, name="tray"
+        )
         icon_thread.start()
 
         self.root.after(300, self.prompt_first_run)
@@ -599,11 +642,9 @@ class KeepAliveApp:
             self.root.after(600, self._show_settings_window)
 
         self.logger.info("Alive Forever started")
-        try:
-            self.root.mainloop()
-        finally:
-            self.shutdown()
-        return 0
+        self.root.after(500, self._check_runtime)
+        self.root.mainloop()
+        return 1 if self.runtime_failed.is_set() else 0
 
 
 def build_arg_parser():
@@ -629,6 +670,7 @@ def build_arg_parser():
     parser.add_argument("--paused", action="store_true", help="Start paused.")
     parser.add_argument("--minimized", action="store_true", help="Start without opening the settings window.")
     parser.add_argument("--preset", choices=sorted(PRESET_CONFIGS), help="Apply a preset on launch.")
+    parser.add_argument("--autostart", action="store_true", help="Run with bounded failure recovery.")
     return parser
 
 
@@ -651,7 +693,7 @@ def run_startup_command(args):
             return 1
         if has_console_streams():
             print("Startup: {0} - {1}".format(status.label(), status.detail))
-        return 0 if status.enabled else 1
+        return 0 if status.enabled and status.registration_healthy else 1
 
     if args.unregister_startup:
         try:
@@ -684,6 +726,8 @@ def main(argv=None):
 
     if args.register_startup or args.unregister_startup or args.startup_status:
         return run_startup_command(args)
+    if args.autostart:
+        return startup_module.supervise_startup(LOGGER)
 
     if has_console_streams():
         print("=" * 50)
@@ -693,6 +737,10 @@ def main(argv=None):
         print("Logs: {0}".format(LOG_DIR / "alive_forever.log"))
         print("-" * 50)
 
-    app = KeepAliveApp()
-    app.apply_launch_options(args)
-    return app.run()
+    try:
+        app = KeepAliveApp()
+        app.apply_launch_options(args)
+        return app.run()
+    except Exception:
+        LOGGER.exception("Fatal application startup/runtime error")
+        return 1

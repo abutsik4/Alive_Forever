@@ -6,15 +6,18 @@ from Task Manager's Startup tab, and it also lets us delay launch so the app is
 not competing with the rest of the boot storm. The Run key remains as a
 fallback for machines where task creation is blocked by policy.
 
-Everything here also knows how to *validate* an existing registration, because
-the most common failure is a stale entry pointing at a moved folder or an
-uninstalled interpreter -- which previously failed silently.
+Existing registrations are validated without changing which installation owns
+them. An autostart supervisor supplies bounded recovery for failed child
+processes, even on systems that do not honor Task Scheduler process retries.
 """
 
+import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import winreg
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +30,9 @@ from alive_forever.system.windows import APP_NAME, ROOT_DIR, STARTUP_KEY
 TASK_NAME = APP_NAME
 TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 STARTUP_DELAY = "PT30S"
+RESTART_COUNT = 3
+RESTART_DELAY_SECONDS = 60
+AUTOSTART_FLAG = "--autostart"
 
 METHOD_TASK = "task"
 METHOD_RUN = "run"
@@ -42,7 +48,12 @@ class StartupStatus:
     command: Optional[str] = None
     arguments: str = ""
     healthy: bool = True
+    registration_healthy: bool = True
     detail: str = "Not registered."
+    matches_current_copy: bool = True
+    recovery_configured: bool = False
+    last_result: Optional[int] = None
+    task_disabled: bool = False
 
     def label(self):
         if not self.enabled:
@@ -71,8 +82,52 @@ def launch_target():
 
 def render_run_command(executable, arguments):
     if arguments:
-        return '"{0}" "{1}"'.format(executable, arguments)
-    return '"{0}"'.format(executable)
+        return '"{0}" "{1}" {2}'.format(executable, arguments, AUTOSTART_FLAG)
+    return '"{0}" {1}'.format(executable, AUTOSTART_FLAG)
+
+
+def task_arguments(arguments):
+    return '"{0}" {1}'.format(arguments, AUTOSTART_FLAG) if arguments else AUTOSTART_FLAG
+
+
+def without_autostart_flag(arguments):
+    text = (arguments or "").strip()
+    if text == AUTOSTART_FLAG:
+        return ""
+    if text.endswith(" " + AUTOSTART_FLAG):
+        return text[:-len(AUTOSTART_FLAG)].rstrip()
+    return text
+
+
+def registered_script(method, command, arguments):
+    script = without_autostart_flag(arguments)
+    if method == METHOD_RUN:
+        prefix = '"{0}"'.format(command) if script.startswith('"') else command
+        script = script[len(prefix):]
+    return script.strip().strip('"')
+
+
+def supervise_startup(logger):
+    """Retry the child ourselves: Windows may treat nonzero exits as completion."""
+    executable, script = launch_target()
+    command = [executable] + ([script] if script else [])
+    for attempt in range(RESTART_COUNT + 1):
+        logger.info("Autostart launching application (attempt %s/%s)", attempt + 1, RESTART_COUNT + 1)
+        try:
+            result = subprocess.run(command, creationflags=CREATE_NO_WINDOW)
+            exit_code = result.returncode
+        except OSError:
+            logger.exception("Could not launch the autostart application")
+            exit_code = 1
+        if exit_code == 0:
+            logger.info("Autostart application exited normally; no retry")
+            return 0
+        logger.error("Autostart application exited with code %s", exit_code)
+        if attempt < RESTART_COUNT:
+            logger.warning("Retrying autostart in %s seconds", RESTART_DELAY_SECONDS)
+            time.sleep(RESTART_DELAY_SECONDS)
+    logger.error("Autostart recovery exhausted after %s attempts", RESTART_COUNT + 1)
+    return exit_code
 
 
 def _run_schtasks(args):
@@ -140,7 +195,10 @@ def build_task_xml(executable, arguments):
             '  <Actions Context="Author">',
             "    <Exec>",
             "      <Command>{0}</Command>".format(_escape(executable)),
-            "      <Arguments>{0}</Arguments>".format(_escape(arguments)),
+            "      <Arguments>{0}</Arguments>".format(_escape(task_arguments(arguments))),
+            "      <WorkingDirectory>{0}</WorkingDirectory>".format(
+                _escape(str(Path(arguments or executable).parent))
+            ),
             "    </Exec>",
             "  </Actions>",
             "</Task>",
@@ -223,15 +281,73 @@ def get_startup_status():
     task_registration = read_task_registration()
     if task_registration is not None:
         command, arguments = task_registration
-        return _evaluate(METHOD_TASK, command, arguments, expected_exe, expected_args)
+        status = _evaluate(METHOD_TASK, command, arguments, expected_exe, expected_args)
+        try:
+            runtime = read_task_runtime()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            logging.getLogger("alive_forever").exception("Could not inspect startup task runtime")
+            status.healthy = False
+            status.registration_healthy = False
+            status.detail += " Could not read task execution status; see the log."
+            return status
+        status.recovery_configured = (
+            runtime["restart_count"] == 0
+            and arguments.strip().endswith(AUTOSTART_FLAG)
+        )
+        status.last_result = runtime["last_result"]
+        if runtime["state"] == "Disabled":
+            status.task_disabled = True
+            status.healthy = False
+            status.registration_healthy = False
+            status.detail += " The logon task is disabled."
+        elif runtime["state"] != "Running" and status.last_result not in (0, 0x41303):
+            status.healthy = False
+            status.detail += " Last task execution failed (0x{0:08X}). See the log.".format(
+                status.last_result & 0xFFFFFFFF
+            )
+        elif runtime["state"] == "Running":
+            status.detail += " The task is running."
+        if not status.recovery_configured:
+            status.healthy = False
+            status.registration_healthy = False
+            status.detail += " Automatic failure recovery is not configured."
+        return status
 
     run_value = read_run_registration()
     if run_value is not None:
         command = _executable_from_run_value(run_value)
         arguments = run_value
-        return _evaluate(METHOD_RUN, command, arguments, expected_exe, expected_args)
+        status = _evaluate(METHOD_RUN, command, arguments, expected_exe, expected_args)
+        status.recovery_configured = arguments.strip().endswith(AUTOSTART_FLAG)
+        return status
 
     return StartupStatus(enabled=False, detail="Alive Forever will not start on its own.")
+
+
+def read_task_runtime():
+    # Structured output avoids parsing schtasks' localized status text.
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "$t=Get-ScheduledTask -TaskName 'Alive Forever' -TaskPath '\\'; "
+        "$i=$t | Get-ScheduledTaskInfo; "
+        "@{state=[string]$t.State; last_result=[long]$i.LastTaskResult; "
+        "restart_count=[int]$t.Settings.RestartCount; "
+        "restart_interval=[string]$t.Settings.RestartInterval} | ConvertTo-Json -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=20, check=True,
+    )
+    runtime = json.loads(result.stdout)
+    if (
+        not isinstance(runtime, dict)
+        or not isinstance(runtime.get("state"), str)
+        or not isinstance(runtime.get("last_result"), int)
+        or not isinstance(runtime.get("restart_count"), int)
+        or not isinstance(runtime.get("restart_interval"), str)
+    ):
+        raise ValueError("Invalid task runtime response")
+    return runtime
 
 
 def _evaluate(method, command, arguments, expected_exe, expected_args):
@@ -239,19 +355,24 @@ def _evaluate(method, command, arguments, expected_exe, expected_args):
 
     if not command or not Path(command).exists():
         status.healthy = False
+        status.registration_healthy = False
         status.detail = "Registered, but the program it points at is missing: {0}".format(command or "?")
         return status
 
-    points_at_us = os.path.normcase(str(Path(command))) == os.path.normcase(expected_exe)
-    if expected_args:
-        points_at_us = points_at_us and os.path.normcase(expected_args) in os.path.normcase(arguments or "")
-
-    if not points_at_us:
+    script = registered_script(method, command, arguments)
+    if script and not Path(script).is_file():
         status.healthy = False
-        status.detail = "Registered, but it points at a different copy of the app."
+        status.registration_healthy = False
+        status.detail = "Registered, but the startup script is missing: {0}".format(script)
         return status
 
+    status.matches_current_copy = (
+        os.path.normcase(str(Path(command))) == os.path.normcase(expected_exe)
+        and os.path.normcase(script) == os.path.normcase(expected_args)
+    )
     status.detail = "Alive Forever starts automatically at logon."
+    if not status.matches_current_copy:
+        status.detail += " Uses another registered copy; launching this copy will not replace it."
     return status
 
 
@@ -340,12 +461,22 @@ def set_startup_enabled(enabled, logger):
 
 
 def repair_startup_if_stale(logger):
-    """Re-point a registration that survived a move or a Python reinstall."""
+    """Upgrade our recovery policy without taking ownership from another copy."""
     status = get_startup_status()
-    if not status.enabled or status.healthy:
+    executable, arguments = launch_target()
+    registered_arguments = registered_script(status.method, status.command, status.arguments)
+    owns_registration = (
+        status.method in (METHOD_TASK, METHOD_RUN)
+        and os.path.normcase(status.command or "") == os.path.normcase(executable)
+        and os.path.normcase(registered_arguments) == os.path.normcase(arguments)
+    )
+    if not owns_registration or status.recovery_configured or status.task_disabled:
+        return status
+    if status.method == METHOD_TASK and status.last_result is None:
+        logger.warning("Leaving startup unchanged because task execution status is unavailable")
         return status
 
-    logger.warning("Startup registration is stale (%s); re-registering", status.detail)
+    logger.info("Upgrading this copy's startup recovery policy")
     try:
         return set_startup_enabled(True, logger)
     except RuntimeError:

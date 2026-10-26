@@ -1,11 +1,13 @@
 """Windows-specific paths, DPI, logging, and singleton helpers."""
 
 import ctypes
+import faulthandler
 import json
 import logging
 import os
 import sys
 import tempfile
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -26,6 +28,12 @@ ICO_FILE = ROOT_DIR / "icon.ico"
 STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MUTEX_NAME = "AliveForever.Singleton"
 ERROR_ALREADY_EXISTS = 183
+_fault_log = None
+
+KERNEL32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+KERNEL32.CreateMutexW.restype = ctypes.c_void_p
+KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
+KERNEL32.CloseHandle.restype = ctypes.c_int
 
 
 def ensure_app_directories():
@@ -109,23 +117,27 @@ def write_json_atomic(path, payload):
         raise
 
 
-def setup_logging():
-    logger = logging.getLogger("alive_forever")
+def setup_logging(supervisor=False):
+    logger = logging.getLogger("alive_forever.autostart" if supervisor else "alive_forever")
     if logger.handlers:
         return logger
 
+
     ensure_app_directories()
+    logger.propagate = False
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     file_handler = RotatingFileHandler(
-        LOG_DIR / "alive_forever.log",
+        LOG_DIR / ("autostart.log" if supervisor else "alive_forever.log"),
         maxBytes=1024 * 1024,
         backupCount=5,
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+    if not supervisor:
+        logging.getLogger("pystray").addHandler(file_handler)
 
     # A windowed build has no stderr to attach to; adding the handler anyway
     # makes every log call do failing work that logging then swallows.
@@ -137,6 +149,31 @@ def setup_logging():
     return logger
 
 
+def setup_exception_logging(supervisor=False):
+    """Install before importing the UI so windowed import failures are recorded."""
+    global _fault_log
+    logger = setup_logging(supervisor=supervisor)
+
+    def unhandled(exc_type, value, traceback):
+        logger.critical("Unhandled application exception", exc_info=(exc_type, value, traceback))
+
+    def thread_unhandled(args):
+        if args.exc_type is not SystemExit:
+            logger.critical(
+                "Unhandled exception in thread %s", args.thread.name if args.thread else "?",
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+
+    sys.excepthook = unhandled
+    threading.excepthook = thread_unhandled
+    if _fault_log is None:
+        _fault_log = (LOG_DIR / ("autostart_faults.log" if supervisor else "faults.log")).open(
+            "a", encoding="utf-8"
+        )
+        faulthandler.enable(file=_fault_log, all_threads=True)
+    return logger
+
+
 class SingleInstance:
     def __init__(self, mutex_name):
         self.mutex_name = mutex_name
@@ -144,6 +181,8 @@ class SingleInstance:
 
     def acquire(self):
         self.handle = KERNEL32.CreateMutexW(None, False, self.mutex_name)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
         return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
 
     def release(self):

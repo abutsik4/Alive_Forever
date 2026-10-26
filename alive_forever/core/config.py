@@ -166,7 +166,9 @@ def apply_preset(config, preset_name):
 
     config.interval = preset["interval"]
     config.activity_type = preset["activity_type"]
+    schedule_timezone = config.schedule.timezone
     config.schedule = preset["schedule"].clone()
+    config.schedule.timezone = schedule_timezone
     config.profile_name = preset_name
     return config
 

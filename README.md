@@ -46,8 +46,8 @@
 - Quick Timers: "Stay active for 2 hours" straight from the tray menu.
 - Time-Based Schedule: Choose exactly when the app should stay active.
 - Built-In Presets: Start from Always On, Workday, Evening, or Focus.
-- Self-Healing Startup: Registers a logon task, checks it still works on every
-  launch, and repairs it if you move the folder.
+- Reliable Startup: Registers a delayed logon task with bounded failure retries,
+  checks its last result, and preserves your chosen installation.
 - Retro Control Panel UI: Windows 95-inspired, tabbed, and DPI-aware so it
   stays sharp on scaled displays.
 - Live Stats: Track session and lifetime activity counts.
@@ -274,9 +274,30 @@ If you said no and changed your mind:
 **How it registers.** A Scheduled Task is created first, because Run-key
 entries can be silently disabled from Task Manager's Startup tab. If task
 creation is blocked by policy, it falls back to the Run key automatically.
-Either way the entry is validated on every launch - if you move the folder or
-reinstall Python, it repairs itself instead of quietly failing, and the Status
-card shows whether startup is **registered**, **broken**, or **off**.
+The task waits 30 seconds after sign-in. The `--autostart` supervisor launches
+the application and retries a failed child process up to three times, one
+minute apart. A normal Quit does not trigger a retry. This also works with the
+Run-key fallback. Recovery is implemented by the app because some Windows
+configurations accept Task Scheduler retry settings without actually retrying
+nonzero process exits. Two application processes during autostart are normal:
+the supervisor and the tray application.
+Retry attempts and child exit codes are recorded in
+`%APPDATA%\AliveForever\logs\autostart.log`, separately from the application's
+log so both processes can rotate their own logs safely.
+
+The Status card checks the registered executable/script, disabled task state,
+last task result, and recovery policy. Task status is refreshed at most once
+every 30 seconds. A running task takes precedence over a previous failure.
+Registration health is not a guarantee that the tray or activity loop is healthy.
+
+**One stable installation.** Prefer the installer under
+`%LOCALAPPDATA%\Programs\AliveForever` rather than a build or development folder.
+Launching another source or portable copy, or saving its settings, does not
+replace an existing registration. Only the registered copy upgrades its own
+legacy task policy automatically. To deliberately change the target, run
+`AliveForever.exe --register-startup` from the new location (or
+`python keep_alive.py --register-startup` for a source installation). Do this
+after moving the application or reinstalling its Python interpreter.
 
 ## Command Line
 
@@ -284,8 +305,9 @@ card shows whether startup is **registered**, **broken**, or **off**.
 |------|--------|
 | `--paused` | Start paused for this session only |
 | `--minimized` | Start without opening the settings window |
+| `--autostart` | Supervise the app with up to three one-minute failure retries |
 | `--preset NAME` | Apply a preset (`Always On`, `Workday`, `Evening`, `Focus`, `Custom`) |
-| `--register-startup` | Register auto-start and exit |
+| `--register-startup` | Explicitly register this copy for auto-start and exit |
 | `--unregister-startup` | Remove auto-start and exit |
 | `--startup-status` | Report whether auto-start is registered (exit 0 if healthy) |
 
@@ -328,6 +350,13 @@ per-user logon task from an XML definition does not.
 | **Teams still shows Away** | Try "Both" activity type in settings |
 | **Need to debug silent mode** | Check `%APPDATA%\AliveForever\logs\alive_forever.log` |
 
+Unhandled startup, worker-thread, and Tk callback exceptions are written to
+`alive_forever.log`, including tracebacks. Required tray/activity worker failure
+causes a nonzero exit so the autostart supervisor can retry rather than leaving an
+invisible, partially working process. Native Python faults are captured separately
+in `%APPDATA%\AliveForever\logs\faults.log`. Forced termination, power loss, and
+some native failures may still prevent diagnostics from being written.
+
 ## License
 
 MIT License - feel free to use, modify, and distribute.
@@ -346,3 +375,11 @@ Contributions welcome! Feel free to:
 | Made with care to keep you Alive Forever.                    |
 +--------------------------------------------------------------+
 ```
+
+### Schedule timezone
+
+In Settings > Schedule, choose **Europe/London** for UK time, then Save.
+All schedule hours and weekdays use that timezone, including automatic GMT/BST
+changes. Choose **local** to follow the computer clock (the default for existing
+settings). For example, a 09:00 UK start is 11:00 in Estonia under current rules.
+The app must be running in the tray for schedules to take effect.
