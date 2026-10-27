@@ -4,7 +4,7 @@ import argparse
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 try:
     import pystray
@@ -230,6 +230,37 @@ class KeepAliveApp:
             self.logger.exception("Could not persist override")
         self.refresh_runtime_state()
 
+    def add_overtime(self, minutes):
+        """Extend the current active period without changing the weekly schedule."""
+        if type(minutes) is not int or not 1 <= minutes <= 1440:
+            raise ValueError("Overtime must be between 1 and 1440 minutes.")
+        now = self.now_provider()
+        until = now
+        with self.config_lock:
+            override = self.get_active_override(now)
+            if override and override[0] == "active":
+                until = max(until, override[1])
+            if is_schedule_active(self.config.schedule, now):
+                transition = get_next_transition(self.config.schedule, now)
+                if transition and transition[0] == "scheduled_off":
+                    boundary = transition[1]
+                    if boundary.tzinfo:
+                        boundary = boundary.astimezone(now.tzinfo) if now.tzinfo else boundary.astimezone().replace(tzinfo=None)
+                    elif now.tzinfo:
+                        boundary = boundary.astimezone(now.tzinfo)
+                    until = max(until, boundary)
+            deadline = (until.astimezone(timezone.utc) + timedelta(minutes=minutes)).astimezone(until.tzinfo)
+            until = deadline if until.tzinfo else deadline.replace(tzinfo=None)
+            updated = self.config.clone()
+            updated.override_state = "active"
+            updated.override_until = until
+            save_app_config(updated, self.logger)
+            self.config = updated
+            self.manual_paused = False
+        self.logger.info("Overtime added: %s minutes, active until %s", minutes, until.isoformat())
+        self.refresh_runtime_state()
+        return until
+
     def get_runtime_state(self, now=None):
         now = now or self.now_provider()
 
@@ -320,7 +351,8 @@ class KeepAliveApp:
 
     def get_tray_title(self):
         status_name, _, _ = self.get_status_presentation()
-        transition = format_transition(get_next_transition(self.config.schedule, now=self.now_provider()))
+        now = self.now_provider()
+        transition = "" if self.get_active_override(now) else format_transition(get_next_transition(self.config.schedule, now=now))
         suffix = " | {0}".format(transition) if transition else ""
         return "{0} - {1}{2}".format(APP_NAME, status_name, suffix)
 
@@ -486,6 +518,15 @@ class KeepAliveApp:
         def pause_for(minutes):
             return lambda icon=None, item=None: self.set_override("paused", minutes)
 
+        def overtime(minutes):
+            def callback(icon=None, item=None):
+                try:
+                    self.add_overtime(minutes)
+                except Exception as error:
+                    self.logger.exception("Could not add overtime")
+                    show_message_box("Could not add overtime:\n{0}".format(error))
+            return callback
+
         return pystray.Menu(
             pystray.MenuItem(lambda _: self.get_status_presentation()[0], None, enabled=False),
             pystray.Menu.SEPARATOR,
@@ -493,6 +534,11 @@ class KeepAliveApp:
             pystray.MenuItem(
                 "Stay active for",
                 pystray.Menu(*[pystray.MenuItem(label, stay_active(minutes)) for label, minutes in self.OVERRIDE_CHOICES]),
+            ),
+            pystray.MenuItem(
+                "Add overtime",
+                pystray.Menu(*[pystray.MenuItem(label, overtime(minutes)) for label, minutes in
+                              (("15 minutes", 15),) + self.OVERRIDE_CHOICES]),
             ),
             pystray.MenuItem(
                 "Pause for",

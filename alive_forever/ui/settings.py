@@ -3,8 +3,7 @@
 The window is organised as Windows 95 style tabs rather than one long scrolling
 column: six general options never justified a scrollbar, and the canvas plus
 global mousewheel binding it required were a large amount of plumbing for a
-worse result. The schedule is edited as a 7x24 grid, which also removes the
-"typed a window but forgot to press Add" failure the old editor allowed.
+worse result. The schedule has an hourly grid and an exact-time window editor.
 """
 
 import tkinter as tk
@@ -25,6 +24,7 @@ from alive_forever.core.scheduler import (
     TimeWindow,
     describe_schedule,
     grid_to_windows,
+    parse_time_string,
     schedule_uses_minute_precision,
     windows_to_grid,
 )
@@ -578,17 +578,19 @@ class SettingsWindow:
     def _build_schedule_tab(self, parent):
         row = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
         row.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(row, text="Schedule timezone", bg=ModernStyle.PANEL_BG,
-                 font=ModernStyle.FONT_BODY).pack(side=tk.LEFT)
+        self.schedule_enabled_var = tk.BooleanVar(value=self.app.config.schedule.enabled)
+        tk.Checkbutton(row, text="Enable Schedule", variable=self.schedule_enabled_var,
+                       bg=ModernStyle.PANEL_BG, font=ModernStyle.FONT_BODY,
+                       command=self._update_schedule_preview).pack(side=tk.LEFT)
         self.timezone_var = tk.StringVar(value=self.app.config.schedule.timezone)
         zones = ["local", "Europe/London", "Europe/Tallinn"]
         zones += sorted(available_timezones() - set(zones))
         selector = ttk.Combobox(row, textvariable=self.timezone_var, values=zones,
                                 state="readonly", width=26)
         selector.pack(side=tk.RIGHT)
+        tk.Label(row, text="Timezone", bg=ModernStyle.PANEL_BG,
+                 font=ModernStyle.FONT_BODY).pack(side=tk.RIGHT, padx=6)
         selector.bind("<<ComboboxSelected>>", lambda event: self._update_schedule_preview())
-        self.schedule_enabled_var = tk.BooleanVar(value=self.app.config.schedule.enabled)
-        self._create_toggle_row(parent, "Enable Schedule", self.schedule_enabled_var, command=self._update_schedule_preview)
 
         tk.Label(
             parent,
@@ -605,10 +607,12 @@ class SettingsWindow:
         self.grid.pack(anchor="w")
 
         quick = tk.Frame(parent, bg=ModernStyle.PANEL_BG)
-        quick.pack(fill=tk.X, pady=(8, 0))
+        quick.pack(fill=tk.X, pady=(6, 0))
         self._create_button(quick, "Work hours", lambda: self._fill_grid("work")).pack(side=tk.LEFT, padx=(0, 6))
         self._create_button(quick, "All day", lambda: self._fill_grid("all")).pack(side=tk.LEFT, padx=(0, 6))
         self._create_button(quick, "Clear", lambda: self._fill_grid("none")).pack(side=tk.LEFT)
+        self._create_button(quick, "Exact times...", self._edit_exact_times).pack(side=tk.RIGHT)
+        self._create_button(quick, "Overtime...", self._show_overtime).pack(side=tk.RIGHT, padx=6)
 
         self.precision_label = tk.Label(
             parent,
@@ -621,14 +625,6 @@ class SettingsWindow:
             wraplength=540,
         )
         self.precision_label.pack(fill=tk.X, pady=(8, 0))
-        if schedule_uses_minute_precision(self.draft_windows):
-            self.precision_label.config(
-                text=(
-                    "This schedule uses minute precision. The grid works in whole "
-                    "hours, so editing it will round your windows."
-                )
-            )
-
         self.schedule_preview_label = tk.Label(
             parent,
             text="",
@@ -804,6 +800,166 @@ class SettingsWindow:
 
     # --------------------------------------------------------------- schedule
 
+    def _edit_exact_times(self):
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Exact schedule times")
+        dialog.transient(self.window)
+        dialog.configure(bg=ModernStyle.PANEL_BG)
+        tk.Label(dialog, text="Choose a window to edit. Save settings afterwards to apply.",
+                 bg=ModernStyle.PANEL_BG, font=ModernStyle.FONT_SMALL).pack(padx=12, pady=8)
+        rows = tk.Frame(dialog)
+        rows.pack(fill=tk.BOTH, expand=True, padx=12)
+        listing = tk.Listbox(rows, width=65, height=7, exportselection=False)
+        scrollbar = tk.Scrollbar(rows, command=listing.yview)
+        listing.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listing.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def refresh():
+            listing.delete(0, tk.END)
+            for window in self.build_schedule_windows_for_save():
+                listing.insert(tk.END, window.label())
+
+        def edit():
+            selected = listing.curselection()
+            if selected:
+                self._edit_time_window(dialog, selected[0], refresh)
+            else:
+                messagebox.showerror("Select a window", "Select a schedule window to edit.", parent=dialog)
+
+        def remove():
+            selected = listing.curselection()
+            if not selected:
+                messagebox.showerror("Select a window", "Select a schedule window to remove.", parent=dialog)
+                return
+            windows = self.build_schedule_windows_for_save()
+            del windows[selected[0]]
+            self._set_exact_windows(windows)
+            refresh()
+
+        buttons = tk.Frame(dialog, bg=ModernStyle.PANEL_BG)
+        buttons.pack(fill=tk.X, padx=12, pady=12)
+        self._create_button(buttons, "Add", lambda: self._edit_time_window(dialog, None, refresh)).pack(side=tk.LEFT)
+        self._create_button(buttons, "Edit", edit).pack(side=tk.LEFT, padx=6)
+        self._create_button(buttons, "Remove", remove).pack(side=tk.LEFT)
+        self._create_button(buttons, "Done", dialog.destroy).pack(side=tk.RIGHT)
+        listing.bind("<Double-Button-1>", lambda event: edit())
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        refresh()
+        dialog.grab_set()
+        return dialog
+
+    def _edit_time_window(self, parent, index, on_saved):
+        windows = self.build_schedule_windows_for_save()
+        original = windows[index] if index is not None else TimeWindow("09:00", "17:00", DAY_ORDER[:5])
+        dialog = tk.Toplevel(parent)
+        dialog.title("Edit time window" if index is not None else "Add time window")
+        dialog.transient(parent)
+        dialog.configure(bg=ModernStyle.PANEL_BG)
+        start = tk.StringVar(value=original.start)
+        end = tk.StringVar(value=original.end)
+        times = tuple("{0:02d}:{1:02d}".format(hour, minute) for hour in range(24) for minute in (0, 15, 30, 45))
+        for label, variable in (("Start (HH:MM)", start), ("End (HH:MM)", end)):
+            row = tk.Frame(dialog, bg=ModernStyle.PANEL_BG)
+            row.pack(fill=tk.X, padx=12, pady=6)
+            tk.Label(row, text=label, bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
+            ttk.Combobox(row, textvariable=variable, values=times, width=8).pack(side=tk.RIGHT)
+        tk.Label(dialog, text="Choose a time or type any minute. An earlier end crosses midnight.",
+                 bg=ModernStyle.PANEL_BG, font=ModernStyle.FONT_SMALL).pack(padx=12, pady=6)
+        days = tk.Frame(dialog, bg=ModernStyle.PANEL_BG)
+        days.pack(padx=12, pady=6)
+        day_vars = {}
+        for day in DAY_ORDER:
+            day_vars[day] = tk.BooleanVar(value=day in original.days)
+            tk.Checkbutton(days, text=DAY_LABELS[day], variable=day_vars[day],
+                           bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
+
+        def close():
+            dialog.destroy()
+            parent.grab_set()
+
+        def save():
+            try:
+                window = self.make_time_window(start.get(), end.get(), [day for day in DAY_ORDER if day_vars[day].get()])
+            except ValueError as error:
+                messagebox.showerror("Invalid time window", str(error), parent=dialog)
+                return
+            if index is None:
+                windows.append(window)
+            else:
+                windows[index] = window
+            self._set_exact_windows(windows)
+            on_saved()
+            close()
+
+        buttons = tk.Frame(dialog, bg=ModernStyle.PANEL_BG)
+        buttons.pack(fill=tk.X, padx=12, pady=12)
+        self._create_button(buttons, "Save window", save).pack(side=tk.LEFT)
+        self._create_button(buttons, "Cancel", close).pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Return>", lambda event: save())
+        dialog.bind("<Escape>", lambda event: close())
+        dialog.grab_set()
+        return dialog
+
+    @staticmethod
+    def make_time_window(start, end, days):
+        if not days:
+            raise ValueError("Select at least one day.")
+        return TimeWindow(parse_time_string(start).strftime("%H:%M"),
+                          parse_time_string(end).strftime("%H:%M"), days)
+
+    def _set_exact_windows(self, windows):
+        self.draft_windows = [TimeWindow(**window.to_dict()) for window in windows]
+        self.grid_cells = windows_to_grid(self.draft_windows)
+        self.grid.set_cells(self.grid_cells)
+        self._grid_dirty = False
+        self._update_schedule_preview()
+        self._set_status("Schedule changed. Press Save to apply.")
+
+    def _add_overtime(self):
+        try:
+            until = self.app.add_overtime(int(self.overtime_var.get()))
+        except ValueError:
+            messagebox.showerror("Invalid overtime", "Overtime must be a whole number from 1 to 1440 minutes.", parent=self.window)
+            return
+        except Exception as error:
+            self.app.logger.exception("Could not add overtime")
+            messagebox.showerror("Overtime not added", str(error), parent=self.window)
+            return
+        self._set_status("Overtime applied - active until {0}. Uses the saved schedule.".format(until.strftime("%a %H:%M")))
+        if hasattr(self, "overtime_status_label"):
+            self.overtime_status_label.config(text=self._status_message)
+
+    def _show_overtime(self):
+        dialog = tk.Toplevel(self.window)
+        dialog.title("One-time overtime")
+        dialog.transient(self.window)
+        dialog.configure(bg=ModernStyle.PANEL_BG)
+        tk.Label(dialog, text="Extend the current scheduled end, or start from now if off.\n"
+                 "Applies immediately using the saved schedule, not unsaved edits.",
+                 bg=ModernStyle.PANEL_BG, font=ModernStyle.FONT_SMALL).pack(padx=12, pady=8)
+        controls = tk.Frame(dialog, bg=ModernStyle.PANEL_BG)
+        controls.pack(fill=tk.X, padx=12, pady=6)
+        tk.Label(controls, text="Minutes", bg=ModernStyle.PANEL_BG).pack(side=tk.LEFT)
+        self.overtime_var = tk.StringVar(value="30")
+        tk.Spinbox(controls, from_=1, to=1440, width=5, textvariable=self.overtime_var).pack(side=tk.LEFT, padx=6)
+        self._create_button(controls, "Add overtime", self._add_overtime).pack(side=tk.LEFT)
+        self._create_button(controls, "Clear timer", self._clear_timer).pack(side=tk.RIGHT)
+        self.overtime_status_label = tk.Label(dialog, text="", bg=ModernStyle.PANEL_BG,
+                                              font=ModernStyle.FONT_SMALL, wraplength=440)
+        self.overtime_status_label.pack(fill=tk.X, padx=12, pady=6)
+        self._create_button(dialog, "Done", dialog.destroy).pack(pady=(0, 12))
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        dialog.grab_set()
+        return dialog
+
+    def _clear_timer(self):
+        self.app.clear_override()
+        self._set_status("Timer cleared. Normal schedule resumed.")
+        if hasattr(self, "overtime_status_label"):
+            self.overtime_status_label.config(text=self._status_message)
+
     def _on_grid_change(self):
         self._grid_dirty = True
         self.grid_cells = self.grid.cells
@@ -845,6 +1001,11 @@ class SettingsWindow:
         preview = ScheduleConfig(enabled=self.schedule_enabled_var.get(), windows=windows,
                                  timezone=self.timezone_var.get())
         self.schedule_preview_label.config(text=describe_schedule(preview))
+        if hasattr(self, "precision_label"):
+            self.precision_label.config(text=(
+                "Minute-precision schedule: use Exact times to edit; painting the grid replaces it with whole hours."
+                if schedule_uses_minute_precision(windows) else ""
+            ))
 
     # ---------------------------------------------------------------- runtime
 
@@ -931,7 +1092,7 @@ class SettingsWindow:
 
             schedule_windows = self.build_schedule_windows_for_save()
             if self.schedule_enabled_var.get() and not schedule_windows:
-                raise ValueError("Select at least one hour in the schedule grid, or turn the schedule off.")
+                raise ValueError("Add at least one time window or select grid hours, or turn the schedule off.")
 
             updated_config = self.app.config.clone()
             updated_config.interval = interval
@@ -958,7 +1119,7 @@ class SettingsWindow:
             if self.grid:
                 self.grid.set_cells(self.grid_cells)
             self._grid_dirty = False
-            self.precision_label.config(text="")
+            self._update_schedule_preview()
         except ValueError as error:
             self._set_status(str(error))
             messagebox.showerror("Error", str(error))

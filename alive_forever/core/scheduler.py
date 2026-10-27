@@ -222,7 +222,12 @@ def get_next_transition(schedule, now=None):
 
     if not candidates:
         return None
-    return min(candidates, key=lambda item: item[1])
+    initial = is_schedule_active(schedule, now)
+    for _, boundary in sorted(candidates, key=lambda item: item[1]):
+        active = is_schedule_active(schedule, boundary)
+        if active != initial:
+            return ("active" if active else "scheduled_off", boundary)
+    return None
 
 
 def format_transition(transition):

@@ -150,6 +150,9 @@ After launching, the app runs in your **system tray** (bottom-right corner, near
 - **Status line** - Current state at a glance, no need to open Settings.
 - **Pause / Resume** - Toggle the keep-alive function.
 - **Stay active for** - 30 min / 1 h / 2 h / 4 h. Overrides the schedule.
+- **Add overtime** - Add 15 min / 30 min / 1 h / 2 h / 4 h to the current
+  scheduled end, or from now when outside the schedule. Repeated additions
+  extend the active timer. The weekly schedule stays unchanged.
 - **Pause for** - Same durations, in the other direction.
 - **Clear timer** - Drop a running override and go back to the schedule.
 - **Settings** - Open the configuration panel.
@@ -167,16 +170,31 @@ The panel is organised as tabs, so nothing scrolls:
 |-----|----------|
 | **Status** | Current state, session and lifetime counters, startup health |
 | **Activity** | Preset, interval, activity type, and the Keep Awake options |
-| **Schedule** | A 7x24 grid - click or drag to paint the hours you want active |
+| **Schedule** | Hourly grid, exact-time window editor, timezone, and overtime controls |
 | **Startup** | Start with Windows, start minimized, notifications |
 | **About** | What the app does and does not do, and where the logs live |
 
 `Enter` saves, `Esc` closes. Saving reports into the status bar rather than
 interrupting with a dialog.
 
-> **A note on the schedule grid:** it works in whole hours. If your existing
-> schedule uses minute precision (say 08:30-11:45) the panel says so, and it
-> only rewrites your windows if you actually edit the grid.
+Use **Schedule -> Exact times...** to add, edit, or remove windows with specific
+weekdays. Choose quarter-hour suggestions such as **16:15** or **16:30**, or type
+any **HH:MM** time (for example **16:37**). An end earlier than the start runs
+overnight; identical start and end times are not allowed. Press **Save window**,
+then **Done**, then **Save** in Settings to apply the schedule.
+
+The grid still works in whole hours. Exact times are preserved unless you paint
+the grid or use its Work hours / All day / Clear buttons, which replace the
+windows with whole-hour selections.
+
+For a one-time extension, open **Schedule -> Overtime...**, enter **1-1440
+minutes**, and press **Add overtime**. This applies immediately using the **saved** schedule,
+not unsaved edits. During a scheduled window it extends the end of the current
+continuous active period (including overlapping or adjacent windows); outside
+the schedule, or with scheduling disabled, it starts from now. If an active
+timer already ends later, minutes are added to that deadline instead. Overtime
+resumes activity even if paused, persists across restarts, and returns to the
+normal weekly schedule when the timer expires. **Clear timer** cancels it early.
 
 | Setting | Description | Default |
 |---------|-------------|---------|

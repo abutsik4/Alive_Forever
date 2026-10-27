@@ -1,7 +1,8 @@
 import ctypes
 import threading
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from alive_forever.app import KeepAliveApp
 from alive_forever.core.config import AppConfig, config_from_raw
@@ -142,6 +143,108 @@ class OverrideTests(unittest.TestCase):
 
         self.assertIsNone(app.config.override_state)
         self.assertEqual("scheduled_off", app.get_runtime_state())
+
+
+class OvertimeTests(unittest.TestCase):
+    def setUp(self):
+        self.schedule = ScheduleConfig(
+            enabled=True, windows=[TimeWindow("09:00", "16:15", ["tue"])]
+        )
+        self.app = _App(AppConfig(schedule=self.schedule), datetime(2026, 8, 18, 14))
+        patcher = patch("alive_forever.app.save_app_config")
+        self.save = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_extends_scheduled_end_and_preserves_weekly_schedule(self):
+        original = self.schedule.to_dict()
+        until = self.app.add_overtime(30)
+        self.assertEqual(datetime(2026, 8, 18, 16, 45), until)
+        self.assertEqual(original, self.app.config.schedule.to_dict())
+        self.save.assert_called_once_with(self.app.config, self.app.logger)
+        self.assertEqual("active", self.app.get_runtime_state(datetime(2026, 8, 18, 16, 44, 59)))
+        self.assertEqual("scheduled_off", self.app.get_runtime_state(until))
+        self.assertEqual("active", self.app.get_runtime_state(datetime(2026, 8, 25, 10)))
+
+    def test_outside_schedule_starts_from_now(self):
+        self.app._now = datetime(2026, 8, 18, 17)
+        self.assertEqual(datetime(2026, 8, 18, 17, 15), self.app.add_overtime(15))
+
+    def test_repeated_overtime_adds_to_existing_deadline(self):
+        self.app.add_overtime(30)
+        self.assertEqual(datetime(2026, 8, 18, 17), self.app.add_overtime(15))
+
+    def test_short_active_timer_does_not_shorten_scheduled_day(self):
+        self.app.config.override_state = "active"
+        self.app.config.override_until = self.app._now + timedelta(minutes=10)
+        self.assertEqual(datetime(2026, 8, 18, 16, 30), self.app.add_overtime(15))
+
+    def test_paused_timer_is_replaced_and_manual_pause_is_lifted(self):
+        self.app.config.override_state = "paused"
+        self.app.config.override_until = datetime(2026, 8, 18, 20)
+        self.app.manual_paused = True
+        self.app.add_overtime(15)
+        self.assertFalse(self.app.manual_paused)
+        self.assertEqual("active", self.app.config.override_state)
+        self.assertEqual(datetime(2026, 8, 18, 16, 30), self.app.config.override_until)
+
+    def test_disabled_schedule_uses_now(self):
+        self.app.config.schedule.enabled = False
+        self.assertEqual(datetime(2026, 8, 18, 14, 30), self.app.add_overtime(30))
+
+    def test_cross_midnight_extension(self):
+        self.app.config.schedule.windows = [TimeWindow("22:30", "01:15", ["tue"])]
+        self.app._now = datetime(2026, 8, 18, 23)
+        self.assertEqual(datetime(2026, 8, 19, 1, 45), self.app.add_overtime(30))
+
+    def test_overlapping_windows_extend_the_continuous_period(self):
+        self.app.config.schedule.windows.append(TimeWindow("16:00", "17:30", ["tue"]))
+        self.assertEqual(datetime(2026, 8, 18, 18), self.app.add_overtime(30))
+
+    def test_named_timezone_uses_schedule_end_in_that_zone(self):
+        self.app.config.schedule.timezone = "Europe/London"
+        self.app._now = datetime(2026, 8, 18, 13, tzinfo=timezone.utc)
+        self.assertEqual(datetime(2026, 8, 18, 15, 45, tzinfo=timezone.utc), self.app.add_overtime(30))
+
+    def test_overtime_duration_uses_elapsed_minutes_across_dst(self):
+        self.app.config.schedule.timezone = "Europe/London"
+        self.app.config.schedule.windows = [TimeWindow("00:00", "01:30", ["sun"])]
+        self.app._now = datetime(2026, 10, 25, 0, 15, tzinfo=timezone.utc)
+        self.assertEqual(datetime(2026, 10, 25, 1, tzinfo=timezone.utc), self.app.add_overtime(30))
+
+    def test_invalid_duration_does_not_change_config(self):
+        for minutes in (0, -1, 1441, 1.5, True, "30"):
+            with self.subTest(minutes=minutes), self.assertRaises(ValueError):
+                self.app.add_overtime(minutes)
+        self.save.assert_not_called()
+        self.assertIsNone(self.app.config.override_until)
+
+    def test_failed_save_leaves_runtime_unchanged(self):
+        self.save.side_effect = OSError("disk full")
+        self.app.manual_paused = True
+        with self.assertRaises(OSError):
+            self.app.add_overtime(30)
+        self.assertIsNone(self.app.config.override_until)
+        self.assertTrue(self.app.manual_paused)
+        self.assertEqual(0, self.app.refreshed)
+
+    def test_overtime_survives_config_round_trip_and_can_be_cleared(self):
+        until = self.app.add_overtime(15)
+        self.app.config = config_from_raw(self.app.config.to_dict())
+        self.assertEqual(until, self.app.config.override_until)
+        self.app.clear_override()
+        self.assertEqual("scheduled_off", self.app.get_runtime_state(until))
+
+    def test_tray_title_does_not_advertise_schedule_cutoff_during_overtime(self):
+        self.app.add_overtime(30)
+        title = self.app.get_tray_title()
+        self.assertIn("16:45", title)
+        self.assertNotIn("Next:", title)
+
+    def test_tray_overtime_action_uses_same_extension_logic(self):
+        menu = self.app.build_tray_menu()
+        submenu = next(item.submenu for item in menu.items if item.text == "Add overtime")
+        next(item for item in submenu.items if item.text == "15 minutes")(None)
+        self.assertEqual(datetime(2026, 8, 18, 16, 30), self.app.config.override_until)
 
 
 class ExecutionStateTests(unittest.TestCase):
